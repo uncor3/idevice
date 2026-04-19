@@ -54,7 +54,7 @@ pub trait RsdProvider: Unpin + Send + Sync + std::fmt::Debug {
 
 /// TCP-based device connection provider
 #[cfg(feature = "tcp")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TcpProvider {
     /// IP address of the device
     pub addr: std::net::IpAddr,
