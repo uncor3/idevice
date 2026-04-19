@@ -921,6 +921,9 @@ pub enum IdeviceError {
     #[cfg(feature = "xctest")]
     #[error("xctest session timed out after {0:.1}s")]
     XcTestTimeout(f64),
+
+    #[error("operation timed out")]
+    Timeout,
 }
 
 impl IdeviceError {
@@ -1082,6 +1085,8 @@ impl IdeviceError {
             // 208: Restore (see RestoreError::sub_code for the specific failure)
             #[cfg(any(feature = "restore", feature = "preboard_service"))]
             IdeviceError::Restore(_) => 208,
+
+            IdeviceError::Timeout => -71,
         }
     }
 
