@@ -130,12 +130,13 @@ pub trait RsdService: Sized {
     fn from_stream(
         stream: Box<dyn ReadWrite>,
     ) -> impl std::future::Future<Output = Result<Self, IdeviceError>> + Send;
-    fn connect_rsd(
-        provider: &mut impl RsdProvider,
-        handshake: &mut rsd::RsdHandshake,
-    ) -> impl std::future::Future<Output = Result<Self, IdeviceError>>
+    fn connect_rsd<'a, P>(
+        provider: &'a mut P,
+        handshake: &'a mut rsd::RsdHandshake,
+    ) -> impl std::future::Future<Output = Result<Self, IdeviceError>> + Send + 'a
     where
-        Self: crate::RsdService,
+        P: RsdProvider + Send + 'a,
+        Self: Sized,
     {
         handshake.connect(provider)
     }
@@ -270,6 +271,7 @@ impl Idevice {
     ///
     /// # Errors
     /// Returns `IdeviceError` if serialization or transmission fails
+    #[allow(dead_code)] // only building idevice fails with method `send_bplist` is never used
     async fn send_plist(&mut self, message: plist::Value) -> Result<(), IdeviceError> {
         if let Some(socket) = &mut self.socket {
             debug!("Sending plist: {}", pretty_print_plist(&message));
@@ -694,6 +696,8 @@ pub enum HeartbeatError {
     SleepyTime,
     #[error("heartbeat timeout")]
     Timeout,
+    #[error("unknown heartbeat error")]
+    Unknown,
 }
 
 impl HeartbeatError {
@@ -701,6 +705,7 @@ impl HeartbeatError {
         match self {
             Self::SleepyTime => 1,
             Self::Timeout => 2,
+            Self::Unknown => 3,
         }
     }
 }
@@ -867,6 +872,9 @@ pub enum IdeviceError {
     #[cfg(feature = "xctest")]
     #[error("xctest session timed out after {0:.1}s")]
     XcTestTimeout(f64),
+
+    #[error("operation timed out")]
+    Timeout,
 }
 
 impl IdeviceError {
@@ -1019,6 +1027,8 @@ impl IdeviceError {
             IdeviceError::TestRunnerDisconnected => 206,
             #[cfg(feature = "xctest")]
             IdeviceError::XcTestTimeout(_) => 207,
+
+            IdeviceError::Timeout => -71,
         }
     }
 
