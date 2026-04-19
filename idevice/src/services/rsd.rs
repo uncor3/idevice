@@ -167,23 +167,29 @@ impl RsdHandshake {
         })
     }
 
-    pub async fn connect<T>(&mut self, provider: &mut impl RsdProvider) -> Result<T, IdeviceError>
+    pub fn connect<'a, T, P>(
+        &'a mut self,
+        provider: &'a mut P,
+    ) -> impl std::future::Future<Output = Result<T, IdeviceError>> + Send + 'a
     where
-        T: crate::RsdService,
+        T: for<'b> crate::RsdService,
+        P: RsdProvider + Send + 'a,
     {
-        let service_name = T::rsd_service_name();
-        let service = match self.services.get(&service_name.to_string()) {
-            Some(s) => s,
-            None => {
-                return Err(IdeviceError::ServiceNotFound);
-            }
-        };
+        async move {
+            let service_name = T::rsd_service_name();
+            let service = match self.services.get(&service_name.to_string()) {
+                Some(s) => s,
+                None => {
+                    return Err(IdeviceError::ServiceNotFound);
+                }
+            };
 
-        debug!(
-            "Connecting to RSD service {service_name} on port {}",
-            service.port
-        );
-        let stream = provider.connect_to_service_port(service.port).await?;
-        T::from_stream(stream).await
+            debug!(
+                "Connecting to RSD service {service_name} on port {}",
+                service.port
+            );
+            let stream = provider.connect_to_service_port(service.port).await?;
+            T::from_stream(stream).await
+        }
     }
 }
