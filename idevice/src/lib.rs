@@ -910,9 +910,6 @@ pub enum IdeviceError {
     #[cfg(feature = "xctest")]
     #[error("xctest session timed out after {0:.1}s")]
     XcTestTimeout(f64),
-
-    #[error("operation timed out")]
-    Timeout,
 }
 
 impl IdeviceError {
@@ -1071,7 +1068,6 @@ impl IdeviceError {
             #[cfg(feature = "xctest")]
             IdeviceError::XcTestTimeout(_) => 207,
 
-            IdeviceError::Timeout => -71,
         }
     }
 
