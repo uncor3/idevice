@@ -545,7 +545,7 @@ async fn rsd_connect(
                 );
                 last_err = Some(error);
                 if attempt < MAX_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                    crate::time::sleep(std::time::Duration::from_millis(750)).await;
                 }
             }
         }
@@ -642,7 +642,7 @@ async fn connect_testmanagerd_rsd(
                 );
                 last_err = Some(error);
                 if attempt < RSD_STACK_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    crate::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
         }
@@ -1044,7 +1044,7 @@ async fn launch_and_authorize_test_runner(
     debug!("Launched test runner pid={}", pid);
 
     if ios_major_version < 17 {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        crate::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     ctrl_proxy.authorize_test(ios_major_version, pid).await?;
@@ -1727,13 +1727,13 @@ pub(super) async fn run_dispatch_loop<L: XCUITestListener>(
     listener: &mut L,
     timeout: Option<std::time::Duration>,
 ) -> Result<(), IdeviceError> {
-    let deadline = timeout.map(|t| std::time::Instant::now() + t);
+    let deadline = timeout.map(|t| crate::time::Instant::now() + t);
     let mut done = false;
 
     loop {
         let remaining = if let Some(dl) = deadline {
             let r = dl
-                .checked_duration_since(std::time::Instant::now())
+                .checked_duration_since(crate::time::Instant::now())
                 .ok_or_else(|| IdeviceError::XcTestTimeout(timeout.unwrap().as_secs_f64()))?;
             Some(r)
         } else {

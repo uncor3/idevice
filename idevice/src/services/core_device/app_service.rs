@@ -336,6 +336,7 @@ impl<R: ReadWrite> AppServiceClient<R> {
         Ok(res)
     }
 
+    #[cfg(feature = "dvt")]
     pub async fn fetch_app_icon(
         &mut self,
         bundle_id: impl Into<String>,

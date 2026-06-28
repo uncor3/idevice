@@ -21,6 +21,7 @@ use idevice::{
 use crate::core_device_proxy::AdapterHandle;
 use crate::rp_pairing_file::RpPairingFileHandle;
 use crate::rsd::RsdHandshakeHandle;
+use crate::run_global_timeout;
 use crate::util::{SockAddr, idevice_sockaddr, idevice_socklen_t};
 use crate::{IdeviceFfiError, ffi_err, provider::IdeviceProviderHandle, run_sync_local};
 
@@ -32,7 +33,6 @@ unsafe impl Sync for PinCtx {}
 /// the TLS-PSK tunnel and return adapter + handshake.
 async fn finish_tunnel(
     rpc: &mut idevice::remote_pairing::RemotePairingClient<
-        '_,
         impl idevice::remote_pairing::RpPairingSocketProvider,
     >,
     connect_addr: std::net::SocketAddr,
@@ -40,12 +40,12 @@ async fn finish_tunnel(
     use idevice::remote_pairing::connect_tls_psk_tunnel_native;
 
     let tunnel_port = rpc.create_tcp_listener().await?;
-    let tunnel_addr = std::net::SocketAddr::new(connect_addr.ip(), tunnel_port);
-    let tunnel_stream = tokio::net::TcpStream::connect(tunnel_addr)
+    let mut tunnel_addr = connect_addr;
+    tunnel_addr.set_port(tunnel_port);
+    let tunnel_stream = run_global_timeout(|| tokio::net::TcpStream::connect(tunnel_addr))
         .await
         .map_err(|e| IdeviceError::InternalError(format!("TLS tunnel: {e}")))?;
-    let tunnel =
-        connect_tls_psk_tunnel_native(Box::new(tunnel_stream), rpc.encryption_key()).await?;
+    let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, rpc.encryption_key()).await?;
 
     let client_ip: std::net::IpAddr = tunnel
         .info
@@ -184,8 +184,8 @@ pub unsafe extern "C" fn tunnel_pair_usb(
         let _ = conn.recv_root().await?;
 
         let mut rpf = RpPairingFile::generate(&host);
-        let mut rpc = RemotePairingClient::new(conn, &host, &mut rpf);
-        rpc.connect(async |_| get_pin(pin_callback, &ctx), 0u8)
+        let mut rpc = RemotePairingClient::new(conn, &host);
+        rpc.connect(&mut rpf, async || get_pin(pin_callback, &ctx))
             .await?;
 
         Ok::<_, IdeviceError>(rpf)
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn tunnel_create_remotexpc(
 
     let res = run_sync_local(async {
         // RSD handshake to discover tunnel service
-        let rsd_stream = tokio::net::TcpStream::connect(socket_addr)
+        let rsd_stream = run_global_timeout(|| tokio::net::TcpStream::connect(socket_addr))
             .await
             .map_err(|e| IdeviceError::InternalError(format!("RSD connect: {e}")))?;
         let rsd_handshake = RsdHandshake::new(rsd_stream).await?;
@@ -253,7 +253,7 @@ pub unsafe extern "C" fn tunnel_create_remotexpc(
 
         // Connect to tunnel service via RemoteXPC
         let ts_addr = std::net::SocketAddr::new(socket_addr.ip(), ts.port);
-        let ts_stream = tokio::net::TcpStream::connect(ts_addr)
+        let ts_stream = run_global_timeout(|| tokio::net::TcpStream::connect(ts_addr))
             .await
             .map_err(|e| IdeviceError::InternalError(format!("tunnel service: {e}")))?;
         let mut conn = RemoteXpcClient::new(ts_stream).await?;
@@ -261,8 +261,8 @@ pub unsafe extern "C" fn tunnel_create_remotexpc(
         let _ = conn.recv_root().await?;
 
         // RPPairing over RemoteXPC
-        let mut rpc = RemotePairingClient::new(conn, &host, rpf);
-        rpc.connect(async |_| get_pin(pin_callback, &ctx), 0u8)
+        let mut rpc = RemotePairingClient::new(conn, &host);
+        rpc.connect(rpf, async || get_pin(pin_callback, &ctx))
             .await?;
 
         finish_tunnel(&mut rpc, socket_addr).await
@@ -321,13 +321,13 @@ pub unsafe extern "C" fn tunnel_create_rppairing(
 
     let res = run_sync_local(async {
         // Connect directly and use raw RPPairing protocol
-        let stream = tokio::net::TcpStream::connect(socket_addr)
+        let stream = run_global_timeout(|| tokio::net::TcpStream::connect(socket_addr))
             .await
             .map_err(|e| IdeviceError::InternalError(format!("connect: {e}")))?;
         let conn = RpPairingSocket::new(stream);
 
-        let mut rpc = RemotePairingClient::new(conn, &host, rpf);
-        rpc.connect(async |_| get_pin(pin_callback, &ctx), 0u8)
+        let mut rpc = RemotePairingClient::new(conn, &host);
+        rpc.connect(rpf, async || get_pin(pin_callback, &ctx))
             .await?;
 
         finish_tunnel(&mut rpc, socket_addr).await

@@ -16,6 +16,8 @@ libc = "0.2.171"
 plist = "1.7.1"
 plist_ffi = { version = "0.1.6" }
 uuid = { version = "1.12", features = ["v4"], optional = true }
+serde_json = { version = "1", optional = true }
+mdns-sd = { version = "0.19", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
@@ -23,6 +25,7 @@ windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 [features]
 aws-lc = ["idevice/aws-lc"]
 ring = ["idevice/ring"]
+openssl = ["idevice/openssl"]
 
 
 afc = ["idevice/afc"]
@@ -38,6 +41,8 @@ dvt = ["idevice/dvt"]
 device_info = ["idevice/device_info"]
 application_listing = ["idevice/application_listing"]
 condition_inducer = ["idevice/condition_inducer"]
+energy_monitor = ["idevice/energy_monitor"]
+graphics = ["idevice/graphics"]
 network_monitor = ["idevice/network_monitor"]
 sysmontap = ["idevice/sysmontap"]
 heartbeat = ["idevice/heartbeat"]
@@ -56,14 +61,16 @@ pcapd = ["idevice/pcapd"]
 preboard_service = ["idevice/preboard_service"]
 obfuscate = ["idevice/obfuscate"]
 restore_service = ["idevice/restore_service"]
-remote_pairing = ["idevice/remote_pairing"]
+remote_pairing = ["idevice/remote_pairing", "dep:mdns-sd"]
 rsd = ["idevice/rsd"]
 syslog_relay = ["idevice/syslog_relay"]
 tcp = ["idevice/tcp"]
 tunnel_tcp_stack = ["idevice/tunnel_tcp_stack"]
+tunnel_tcp_stack_pcap = ["idevice/tunnel_tcp_stack_pcap"]
 tss = ["idevice/tss"]
 tunneld = ["idevice/tunneld"]
 usbmuxd = ["idevice/usbmuxd"]
+wda = ["idevice/wda", "dep:serde_json"]
 xpc = ["idevice/xpc"]
 screenshotr = ["idevice/screenshotr"]
 full = [
@@ -80,6 +87,8 @@ full = [
   "device_info",
   "application_listing",
   "condition_inducer",
+  "energy_monitor",
+  "graphics",
   "network_monitor",
   "sysmontap",
   "heartbeat",
@@ -103,9 +112,11 @@ full = [
   "syslog_relay",
   "tcp",
   "tunnel_tcp_stack",
+  "tunnel_tcp_stack_pcap",
   "tss",
   "tunneld",
   "usbmuxd",
+  "wda",
   "xpc",
 ]
 default = ["full", "aws-lc"]

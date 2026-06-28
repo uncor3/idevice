@@ -55,7 +55,7 @@ pub struct PairingFile {
     pub root_certificate: X509,
     pub system_buid: String,
     pub host_id: String,
-    pub escrow_bag: Vec<u8>,
+    pub escrow_bag: Option<Vec<u8>>,
     pub wifi_mac_address: String,
     pub udid: Option<String>,
 }
@@ -148,8 +148,15 @@ impl PairingFile {
     /// - Cryptographic materials are invalid
     pub fn from_value(v: &plist::Value) -> Result<Self, crate::IdeviceError> {
         let raw: RawPairingFile = plist::from_value(v)?;
-        let p = raw.try_into()?;
-        Ok(p)
+        match raw.try_into() {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                warn!("Unable to convert raw pairing file into pairing file: {e:?}");
+                Err(crate::IdeviceError::UnexpectedResponse(
+                    "failed to convert raw pairing file into pairing file".into(),
+                ))
+            }
+        }
     }
 
     /// Serializes the pairing file to a PLIST-formatted byte vector
@@ -289,6 +296,7 @@ impl TryFrom<PairingFile> for RawPairingFile {
     }
 }
 
+#[cfg(feature = "rustls")]
 /// Helper function to ensure data has proper PEM headers
 /// If the data already has headers, it returns it as is
 /// If not, it adds the appropriate BEGIN and END headers
@@ -332,6 +340,7 @@ fn ensure_pem_headers(data: &[u8], pem_type: &str) -> Vec<u8> {
     result
 }
 
+#[cfg(feature = "rustls")]
 /// Check if data is already in PEM format
 fn is_pem_formatted(data: &[u8]) -> bool {
     if let Ok(data_str) = std::str::from_utf8(data) {
@@ -341,6 +350,7 @@ fn is_pem_formatted(data: &[u8]) -> bool {
     }
 }
 
+#[cfg(feature = "rustls")]
 /// Check if data is already base64 encoded
 fn is_base64(data: &[u8]) -> bool {
     if let Ok(data_str) = std::str::from_utf8(data) {

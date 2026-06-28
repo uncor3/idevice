@@ -65,6 +65,7 @@ pub unsafe extern "C" fn adapter_connect(
 /// # Safety
 /// `handle` must be a valid pointer to a handle allocated by this library
 /// `path` must be a valid null-terminated string
+#[cfg(feature = "tunnel_tcp_stack_pcap")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adapter_pcap(
     handle: *mut AdapterHandle,

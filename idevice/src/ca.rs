@@ -13,10 +13,10 @@ use sha2::Sha256;
 use x509_cert::{
     Certificate,
     builder::{Builder, CertificateBuilder, Profile},
-    der::EncodePem,
+    der::{EncodePem, asn1::GeneralizedTime},
     name::Name,
     serial_number::SerialNumber,
-    time::Validity,
+    time::{Time, Validity},
 };
 
 #[derive(Clone, Debug)]
@@ -37,10 +37,21 @@ pub fn make_cert(
         None => Name::default(),
     };
 
-    // Set validity (10 years)
-    let validity = Validity::from_now(std::time::Duration::from_secs(
+    // Set validity (10 years). We avoid `Validity::from_now` because it
+    // calls `std::time::SystemTime::now()`, which panics at runtime on
+    // wasm32-unknown-unknown. `web-time` is a zero-cost alias on native
+    // and uses `Date.now()` on wasm.
+    let lifetime = std::time::Duration::from_secs(
         365 * 9 * 12 * 31 * 24 * 60 * 60, // idk like 9 years
-    ))?;
+    );
+    let now_unix = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_err(|e| format!("system time before unix epoch: {e}"))?;
+    let then_unix = now_unix + lifetime;
+    let validity = Validity {
+        not_before: Time::GeneralTime(GeneralizedTime::from_unix_duration(now_unix)?),
+        not_after: Time::GeneralTime(GeneralizedTime::from_unix_duration(then_unix)?),
+    };
 
     let signing_key = SigningKey::<Sha256>::new(signing_key.clone());
     let public_key = SubjectPublicKeyInfo::from_key(public_key.clone())?;

@@ -58,7 +58,7 @@ impl HeartbeatClient {
         // Get a plist or wait for the interval
         let rec = tokio::select! {
             rec = self.idevice.read_plist() => rec?,
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
+            _ = crate::time::sleep(std::time::Duration::from_secs(interval)) => {
                 return Err(HeartbeatError::Timeout.into())
             }
         };

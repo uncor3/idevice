@@ -1,11 +1,13 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(docsrs, doc = include_str!("../README.md"))]
 #![warn(missing_debug_implementations)]
 #![warn(missing_copy_implementations)]
 // Jackson Coxson
 
-#[cfg(all(feature = "pair", feature = "rustls"))]
+#[cfg(feature = "pair")]
 mod ca;
 pub mod cursor;
+#[cfg(feature = "mdns")]
+pub mod mdns;
 mod obfuscation;
 pub mod pairing_file;
 pub mod provider;
@@ -27,6 +29,21 @@ pub mod xpc;
 
 pub mod services;
 pub use services::*;
+
+/// Time primitives that work across native and wasm32-unknown-unknown.
+///
+/// On native targets this is `tokio::time`. On wasm32 we route to `wasmtimer`
+/// because `tokio::time` panics at runtime there (no timer backend).
+#[allow(unused_imports)]
+pub(crate) mod time {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use tokio::time::*;
+    #[cfg(target_arch = "wasm32")]
+    pub use wasmtimer::std::Instant;
+    #[cfg(target_arch = "wasm32")]
+    pub use wasmtimer::tokio::*;
+}
+
 #[cfg(any(feature = "core_device_proxy", feature = "remote_pairing"))]
 pub mod tunnel;
 
@@ -80,22 +97,7 @@ pub trait IdeviceService: Sized {
     async fn connect(provider: &dyn IdeviceProvider) -> Result<Self, IdeviceError> {
         let mut lockdown = LockdownClient::connect(provider).await?;
 
-        #[cfg(feature = "openssl")]
         let legacy = lockdown
-            .get_value(Some("ProductVersion"), None)
-            .await
-            .ok()
-            .as_ref()
-            .and_then(|x| x.as_string())
-            .and_then(|x| x.split(".").next())
-            .and_then(|x| x.parse::<u8>().ok())
-            .map(|x| x < 5)
-            .unwrap_or(false);
-
-        #[cfg(not(feature = "openssl"))]
-        let legacy = false;
-
-        lockdown
             .start_session(&provider.get_pairing_file().await?)
             .await?;
         // Best-effort fetch UDID for downstream defaults (e.g., MobileBackup2 Target/Source identifiers)
@@ -298,6 +300,7 @@ impl Idevice {
     ///
     /// # Errors
     /// Returns `IdeviceError` if serialization or transmission fails
+    #[allow(dead_code)]
     async fn send_bplist(&mut self, message: plist::Value) -> Result<(), IdeviceError> {
         if let Some(socket) = &mut self.socket {
             debug!("Sending plist: {}", pretty_print_plist(&message));
@@ -534,32 +537,40 @@ impl Idevice {
         }
     }
 
+    /// Reads from the socket until `delimiter` is found, returning the data before it.
+    ///
+    /// `buffer` is owned by the caller and persists across calls. Any data read past the
+    /// first delimiter is retained in `buffer`. The caller must reuse the same buffer for a given stream.
     #[cfg(feature = "syslog_relay")]
     async fn read_until_delim(
         &mut self,
+        buffer: &mut bytes::BytesMut,
         delimiter: &[u8],
     ) -> Result<Option<bytes::BytesMut>, IdeviceError> {
         if let Some(socket) = &mut self.socket {
-            let mut buffer = bytes::BytesMut::with_capacity(1024);
             let mut temp = [0u8; 1024];
 
             loop {
-                let n = socket.read(&mut temp).await?;
-                if n == 0 {
-                    if buffer.is_empty() {
-                        return Ok(None); // EOF and no data
-                    } else {
-                        return Ok(Some(buffer)); // EOF but return partial data
-                    }
-                }
-
-                buffer.extend_from_slice(&temp[..n]);
-
+                // Check for the delimiter in data already buffered (including any
+                // remainder carried over from a previous call) before reading more.
                 if let Some(pos) = buffer.windows(delimiter.len()).position(|w| w == delimiter) {
                     let mut line = buffer.split_to(pos + delimiter.len());
                     line.truncate(line.len() - delimiter.len()); // remove delimiter
                     return Ok(Some(line));
                 }
+
+                let n = socket.read(&mut temp).await?;
+                if n == 0 {
+                    if buffer.is_empty() {
+                        return Ok(None); // EOF and no data
+                    } else {
+                        // EOF but return partial data, draining the buffer so a
+                        // subsequent call reports EOF.
+                        return Ok(Some(buffer.split()));
+                    }
+                }
+
+                buffer.extend_from_slice(&temp[..n]);
             }
         } else {
             Err(IdeviceError::NoEstablishedConnection)
@@ -601,10 +612,32 @@ impl Idevice {
                         rustls::crypto::aws_lc_rs::default_provider()
                     }
 
-                    #[cfg(not(any(feature = "ring", feature = "aws-lc")))]
+                    #[cfg(all(
+                        target_arch = "wasm32",
+                        feature = "wasm-crypto",
+                        not(any(feature = "ring", feature = "aws-lc"))
+                    ))]
+                    {
+                        debug!("Using rustls-rustcrypto (pure Rust) crypto backend");
+                        rustls_rustcrypto::provider()
+                    }
+
+                    #[cfg(all(
+                        not(target_arch = "wasm32"),
+                        not(any(feature = "ring", feature = "aws-lc"))
+                    ))]
                     {
                         compile_error!(
                             "No crypto backend was selected! Specify an idevice feature for a crypto backend"
+                        );
+                    }
+                    #[cfg(all(
+                        target_arch = "wasm32",
+                        not(any(feature = "ring", feature = "aws-lc", feature = "wasm-crypto"))
+                    ))]
+                    {
+                        compile_error!(
+                            "No crypto backend was selected! On wasm32 enable the `wasm-crypto` (or `wasm`) feature."
                         );
                     }
 
@@ -651,7 +684,7 @@ impl Idevice {
                 connector.set_options(openssl::ssl::SslOptions::ALLOW_UNSAFE_LEGACY_RENEGOTIATION);
             }
 
-            let mut connector = connector.build().configure()?.into_ssl("ur mom")?;
+            let mut connector = connector.build().configure()?.into_ssl("Device")?;
 
             connector.set_certificate(&pairing_file.host_certificate)?;
             connector.set_private_key(&pairing_file.host_private_key)?;
@@ -732,6 +765,8 @@ pub enum IdeviceError {
     #[cfg(all(feature = "openssl", not(feature = "rustls")))]
     #[error("TLS verification build failed")]
     TlsBuilderFailed(#[from] openssl::error::ErrorStack),
+    #[error("Operation Timeout")]
+    Timeout,
 
     // 2: Data format errors
     #[error("io on plist")]
@@ -740,7 +775,7 @@ pub enum IdeviceError {
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("failed to parse bytes as valid utf8")]
     Utf8Error,
-    #[cfg(feature = "core_device_proxy")]
+    #[cfg(feature = "_serde_json")]
     #[error("JSON serialization failed")]
     Json(#[from] serde_json::Error),
     #[error("cannot parse string as IpAddr")]
@@ -749,7 +784,7 @@ pub enum IdeviceError {
     NotEnoughBytes(usize, usize),
     #[error("integer overflow")]
     IntegerOverflow,
-    #[cfg(any(feature = "tss", feature = "tunneld"))]
+    #[cfg(feature = "_reqwest")]
     #[error("http reqwest error")]
     Reqwest(#[from] reqwest::Error),
 
@@ -842,6 +877,9 @@ pub enum IdeviceError {
     #[cfg(feature = "installation_proxy")]
     #[error(transparent)]
     InstallationProxy(#[from] services::installation_proxy::InstallationProxyError),
+    #[cfg(feature = "core_device")]
+    #[error(transparent)]
+    CoreDevice(#[from] services::core_device::CoreDeviceError),
 
     // Feature-gated service errors (single-variant, not worth a sub-enum)
     #[cfg(feature = "misagent")]
@@ -938,19 +976,22 @@ impl IdeviceError {
             IdeviceError::Socket(_) => 1,
             #[cfg(feature = "rustls")]
             IdeviceError::PemParseFailed(_) => 2,
+            #[cfg(any(feature = "rustls", feature = "openssl"))]
             IdeviceError::Rustls(_) => 3,
+            #[cfg(any(feature = "rustls", feature = "openssl"))]
             IdeviceError::TlsBuilderFailed(_) => 4,
+            IdeviceError::Timeout => 109,
 
             // 5: Data format
             IdeviceError::Plist(_) => 5,
             IdeviceError::Utf8(_) => 6,
             IdeviceError::Utf8Error => 7,
-            #[cfg(feature = "core_device_proxy")]
+            #[cfg(feature = "_serde_json")]
             IdeviceError::Json(_) => 8,
             IdeviceError::AddrParseError(_) => 9,
             IdeviceError::NotEnoughBytes(_, _) => 10,
             IdeviceError::IntegerOverflow => 11,
-            #[cfg(any(feature = "tss", feature = "tunneld"))]
+            #[cfg(feature = "_reqwest")]
             IdeviceError::Reqwest(_) => 12,
 
             // 13: Protocol/device response
@@ -1009,6 +1050,8 @@ impl IdeviceError {
             IdeviceError::Afc(_) => 106,
             #[cfg(feature = "installation_proxy")]
             IdeviceError::InstallationProxy(_) => 107,
+            #[cfg(feature = "core_device")]
+            IdeviceError::CoreDevice(_) => 108,
 
             // 200+: Feature-gated single-variant service errors
             #[cfg(feature = "misagent")]
@@ -1049,6 +1092,8 @@ impl IdeviceError {
             IdeviceError::Afc(e) => e.sub_code(),
             #[cfg(feature = "installation_proxy")]
             IdeviceError::InstallationProxy(e) => e.sub_code(),
+            #[cfg(feature = "core_device")]
+            IdeviceError::CoreDevice(e) => e.sub_code(),
             _ => 0,
         }
     }

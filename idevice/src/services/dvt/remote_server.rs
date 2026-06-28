@@ -66,11 +66,19 @@ use plist::Dictionary;
 use tokio::{
     io::{AsyncWriteExt, ReadHalf, WriteHalf},
     sync::{Mutex, Notify, oneshot},
-    task::JoinHandle,
 };
 use tracing::{debug, warn};
 
 use super::errors::DvtError;
+
+/// Wraps the spawn handle returned from `spawn_reader`. On native we hold a
+/// real `tokio::task::JoinHandle` so `Drop` can `.abort()` the reader; on
+/// wasm32 there's no join/abort primitive available. The reader exits on
+/// transport EOF via the existing read loop, so this is a unit type.
+#[cfg(not(target_arch = "wasm32"))]
+type ReaderTask = tokio::task::JoinHandle<()>;
+#[cfg(target_arch = "wasm32")]
+type ReaderTask = ();
 
 #[cfg(feature = "xctest")]
 fn remote_timeout_error(timeout: std::time::Duration) -> IdeviceError {
@@ -103,7 +111,8 @@ pub const INSTRUMENTS_MESSAGE_TYPE: u32 = 2;
 pub struct RemoteServerClient<R: ReadWrite> {
     label: Arc<str>,
     shared: Arc<RemoteServerShared<WriteHalf<R>>>,
-    reader_task: JoinHandle<()>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    reader_task: ReaderTask,
 }
 
 /// Handle to a specific communication channel
@@ -316,7 +325,7 @@ impl<R: ReadWrite> RemoteServerClient<R> {
         &self,
         timeout: std::time::Duration,
     ) -> Result<Dictionary, IdeviceError> {
-        tokio::time::timeout(timeout, async {
+        crate::time::timeout(timeout, async {
             loop {
                 match &*self.shared.supported_identifiers.lock().await {
                     CapabilityHandshakeState::Received(dict) => return Ok(dict.clone()),
@@ -378,7 +387,7 @@ impl<R: ReadWrite> RemoteServerClient<R> {
             return Ok(Some(capabilities));
         }
 
-        tokio::time::timeout(timeout, async {
+        crate::time::timeout(timeout, async {
             loop {
                 match &*self.shared.supported_identifiers.lock().await {
                     CapabilityHandshakeState::Received(dict) => return Ok(Some(dict.clone())),
@@ -575,7 +584,7 @@ impl<R: ReadWrite> RemoteServerClient<R> {
         };
 
         match timeout {
-            Some(timeout) => tokio::time::timeout(timeout, wait_future)
+            Some(timeout) => crate::time::timeout(timeout, wait_future)
                 .await
                 .map_err(|_| remote_timeout_error(timeout))?,
             None => wait_future.await,
@@ -625,7 +634,7 @@ impl<R: ReadWrite> RemoteServerClient<R> {
         };
 
         match timeout {
-            Some(timeout) => tokio::time::timeout(timeout, wait_future)
+            Some(timeout) => crate::time::timeout(timeout, wait_future)
                 .await
                 .map_err(|_| remote_timeout_error(timeout))?,
             None => wait_future.await,
@@ -845,11 +854,11 @@ impl<R: ReadWrite> RemoteServerClient<R> {
         label: Arc<str>,
         shared: Arc<RemoteServerShared<WriteHalf<R>>>,
         mut reader: ReadHalf<R>,
-    ) -> JoinHandle<()>
+    ) -> ReaderTask
     where
         R: 'static,
     {
-        tokio::spawn(async move {
+        let fut = async move {
             loop {
                 match Message::from_reader(&mut reader).await {
                     Ok(msg) => {
@@ -874,7 +883,16 @@ impl<R: ReadWrite> RemoteServerClient<R> {
                     }
                 }
             }
-        })
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::spawn(fut)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            wasm_bindgen_futures::spawn_local(fut);
+        }
     }
 
     async fn handle_control_message(
@@ -1246,6 +1264,8 @@ impl RemoteServerClient<Box<dyn ReadWrite>> {
 
 impl<R: ReadWrite> Drop for RemoteServerClient<R> {
     fn drop(&mut self) {
+        // No JoinHandle::abort on wasm32
+        #[cfg(not(target_arch = "wasm32"))]
         self.reader_task.abort();
     }
 }
@@ -1368,7 +1388,7 @@ impl<R: ReadWrite + 'static> OwnedChannel<R> {
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<Message, IdeviceError> {
-        tokio::time::timeout(timeout, self.read_message())
+        crate::time::timeout(timeout, self.read_message())
             .await
             .map_err(|_| remote_timeout_error(timeout))?
     }

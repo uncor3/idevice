@@ -5,7 +5,9 @@
 
 use std::{future::Future, pin::Pin};
 
+#[cfg(feature = "tcp")]
 use std::net::IpAddr;
+#[cfg(feature = "tcp")]
 use std::net::{SocketAddr, SocketAddrV6};
 
 #[cfg(feature = "tcp")]

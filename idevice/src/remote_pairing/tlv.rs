@@ -45,6 +45,23 @@ pub struct TLV8Entry {
     pub data: Vec<u8>,
 }
 
+pub fn collect_component_data(
+    entries: &[TLV8Entry],
+    component: PairingDataComponentType,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    for entry in entries {
+        if entry.tlv_type == component {
+            out.extend_from_slice(&entry.data);
+        }
+    }
+    out
+}
+
+pub fn contains_component(entries: &[TLV8Entry], component: PairingDataComponentType) -> bool {
+    entries.iter().any(|entry| entry.tlv_type == component)
+}
+
 pub fn serialize_tlv8(entries: &[TLV8Entry]) -> Vec<u8> {
     let mut out = Vec::new();
     for entry in entries {

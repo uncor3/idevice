@@ -169,7 +169,7 @@ impl NotificationProxyClient {
     ) -> Result<String, IdeviceError> {
         tokio::select! {
             result = self.receive_notification() => result,
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
+            _ = crate::time::sleep(std::time::Duration::from_secs(interval)) => {
                 Err(HeartbeatError::Timeout.into())
             }
         }

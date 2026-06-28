@@ -85,7 +85,9 @@ impl CrashReportCopyMobileClient {
             .open(format!("/{log}"), crate::afc::opcode::AfcFopenMode::RdOnly)
             .await?;
 
-        f.read_entire().await
+        let data = f.read_entire().await?;
+        f.close().await?;
+        Ok(data)
     }
 
     /// Removes a specified crash log file from the device.
@@ -126,17 +128,6 @@ pub async fn flush_reports(
     let mut lockdown = LockdownClient::connect(provider).await?;
 
     let legacy = lockdown
-        .get_value(Some("ProductVersion"), None)
-        .await
-        .ok()
-        .as_ref()
-        .and_then(|x| x.as_string())
-        .and_then(|x| x.split(".").next())
-        .and_then(|x| x.parse::<u8>().ok())
-        .map(|x| x < 5)
-        .unwrap_or(false);
-
-    lockdown
         .start_session(&provider.get_pairing_file().await?)
         .await?;
 

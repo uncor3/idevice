@@ -11,6 +11,9 @@ use crate::{
     provider::IdeviceProvider,
 };
 
+#[cfg(feature = "rsd")]
+use crate::{RsdService, provider::RsdProvider, rsd};
+
 pub const PUBLIC_STAGING: &str = "PublicStaging";
 
 pub const IPCC_REMOTE_FILE: &str = "idevice.ipcc";
@@ -110,37 +113,44 @@ pub async fn determine_package_type<P: AsRef<[u8]>>(
 ) -> Result<PackageType, IdeviceError> {
     let mut package_cursor = BufReader::new(Cursor::new(package.as_ref()));
 
-    let mut archive = ZipFileReader::with_tokio(&mut package_cursor)
-        .await
-        .map_err(InstallationProxyError::from)?;
+    // Zip entry order isn't guaranteed and directory entries are optional, so we can't
+    // trust any fixed index to point at `Payload/<name>.{app,bundle}/`. Scan the central
+    // directory for the first entry under `Payload/` whose top segment carries the
+    // expected extension.
+    let folder_name = {
+        let archive = ZipFileReader::with_tokio(&mut package_cursor)
+            .await
+            .map_err(InstallationProxyError::from)?;
 
-    // the first index is the first folder name, which is probably `Payload`
-    //
-    // we need the folder inside of that `Payload`, which has an extension that we can
-    // determine the type of the package from it, hence the second index
-    let inside_folder = archive
-        .reader_with_entry(1)
-        .await
-        .map_err(InstallationProxyError::from)?;
+        let mut found: Option<String> = None;
+        for entry in archive.file().entries() {
+            let path = entry
+                .filename()
+                .as_str()
+                .map_err(|_| IdeviceError::Utf8Error)?;
 
-    let folder_name = inside_folder
-        .entry()
-        .filename()
-        .as_str()
-        .map_err(|_| IdeviceError::Utf8Error)?
-        .split('/')
-        .nth(1)
-        // only if the package does not have anything inside of the `Payload` folder
-        .ok_or(InstallationProxyError::from(
-            async_zip::error::ZipError::EntryIndexOutOfBounds,
-        ))?
-        .to_string();
+            let Some(rest) = path.strip_prefix("Payload/") else {
+                continue;
+            };
+            let Some(segment) = rest.split('/').next().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if segment.ends_with(".app") || segment.ends_with(".bundle") {
+                found = Some(segment.to_string());
+                break;
+            }
+        }
+        found
+    };
 
-    let bundle_id = get_bundle_id(&mut package_cursor).await?;
+    let Some(folder_name) = folder_name else {
+        return Ok(PackageType::Unknown);
+    };
 
     if folder_name.ends_with(".bundle") {
         Ok(PackageType::Ipcc)
     } else if folder_name.ends_with(".app") {
+        let bundle_id = get_bundle_id(&mut package_cursor).await?;
         Ok(PackageType::Ipa(bundle_id))
     } else {
         Ok(PackageType::Unknown)
@@ -222,12 +232,71 @@ async fn upload_file_to_public_staging<P: AsRef<[u8]>>(
     })
 }
 
+/// Upload a file to `PublicStaging` over RSD and return its InstallationProxy path
+#[cfg(feature = "rsd")]
+async fn upload_file_to_public_staging_rsd<P: AsRef<[u8]>>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    file: P,
+) -> Result<InstallPackage, IdeviceError> {
+    let mut afc = AfcClient::connect_rsd(provider, handshake).await?;
+
+    ensure_public_staging(&mut afc).await?;
+
+    let file = file.as_ref();
+
+    let package_type = determine_package_type(&file).await?;
+
+    let remote_path = format!("{PUBLIC_STAGING}/{}", package_type.get_remote_file()?);
+
+    afc_upload_file(&mut afc, file, &remote_path).await?;
+
+    let options = match package_type {
+        PackageType::Ipcc => plist!({"PackageType": "CarrierBundle"}),
+        PackageType::Ipa(build_id) => plist!({"CFBundleIdentifier": build_id}),
+        PackageType::Unknown => plist!({}),
+    };
+
+    Ok(InstallPackage {
+        remote_package_path: remote_path,
+        options,
+    })
+}
+
 /// Recursively Upload a directory of file to `PublicStaging`
 async fn upload_dir_to_public_staging<P: AsRef<Path>>(
     provider: &dyn IdeviceProvider,
     file: P,
 ) -> Result<InstallPackage, IdeviceError> {
     let mut afc = AfcClient::connect(provider).await?;
+
+    ensure_public_staging(&mut afc).await?;
+
+    let file = file.as_ref();
+    let remote_folder_name = file
+        .iter()
+        .next_back()
+        .map(|x| x.to_string_lossy().to_string())
+        .unwrap_or(IPA_REMOTE_FILE.to_string());
+
+    let remote_path = format!("{PUBLIC_STAGING}/{remote_folder_name}");
+
+    afc_upload_dir(&mut afc, file, &remote_path).await?;
+
+    Ok(InstallPackage {
+        remote_package_path: remote_path,
+        options: plist!({"PackageType": "Developer"}),
+    })
+}
+
+/// Recursively upload a directory to `PublicStaging` over RSD.
+#[cfg(feature = "rsd")]
+async fn upload_dir_to_public_staging_rsd<P: AsRef<Path>>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    file: P,
+) -> Result<InstallPackage, IdeviceError> {
+    let mut afc = AfcClient::connect_rsd(provider, handshake).await?;
 
     ensure_public_staging(&mut afc).await?;
 
@@ -268,6 +337,28 @@ pub async fn prepare_file_upload(
     })
 }
 
+#[cfg(feature = "rsd")]
+pub async fn prepare_file_upload_rsd(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    data: impl AsRef<[u8]>,
+    caller_options: Option<plist::Value>,
+) -> Result<InstallPackage, IdeviceError> {
+    let InstallPackage {
+        remote_package_path,
+        options,
+    } = upload_file_to_public_staging_rsd(provider, handshake, data).await?;
+    let full_options = plist!({
+        :<? caller_options,
+        :< options,
+    });
+
+    Ok(InstallPackage {
+        remote_package_path,
+        options: full_options,
+    })
+}
+
 pub async fn prepare_dir_upload(
     provider: &dyn IdeviceProvider,
     local_path: impl AsRef<Path>,
@@ -277,6 +368,29 @@ pub async fn prepare_dir_upload(
         remote_package_path,
         options,
     } = upload_dir_to_public_staging(provider, &local_path).await?;
+
+    let full_options = plist!({
+        :<? caller_options,
+        :< options,
+    });
+
+    Ok(InstallPackage {
+        remote_package_path,
+        options: full_options,
+    })
+}
+
+#[cfg(feature = "rsd")]
+pub async fn prepare_dir_upload_rsd(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    local_path: impl AsRef<Path>,
+    caller_options: Option<plist::Value>,
+) -> Result<InstallPackage, IdeviceError> {
+    let InstallPackage {
+        remote_package_path,
+        options,
+    } = upload_dir_to_public_staging_rsd(provider, handshake, &local_path).await?;
 
     let full_options = plist!({
         :<? caller_options,
