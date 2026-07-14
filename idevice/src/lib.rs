@@ -1083,7 +1083,6 @@ impl IdeviceError {
             #[cfg(any(feature = "restore", feature = "preboard_service"))]
             IdeviceError::Restore(_) => 208,
 
-            IdeviceError::Timeout => -71,
         }
     }
 
