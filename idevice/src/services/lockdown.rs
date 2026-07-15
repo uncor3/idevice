@@ -252,8 +252,9 @@ impl LockdownClient {
             .and_then(|x| x.as_string())
             .and_then(|x| x.split(".").next())
             .and_then(|x| x.parse::<u8>().ok())
-            .map(|x| x < 5)
+            .map(|x| x < 7)
             .unwrap_or(false);
+        tracing::warn!("Using legacy {}", legacy);
 
         let request = crate::plist!({
             "Label": self.idevice.label.clone(),
