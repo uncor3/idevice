@@ -92,6 +92,21 @@ impl OwnedFileDescriptor {
 }
 
 crate::impl_to_structs!(FileDescriptor<'_>, OwnedFileDescriptor;  {
+    /// Acquires a shared advisory lock through AFC.
+    pub async fn lock_shared(&mut self) -> Result<(), IdeviceError> {
+        self.inner.as_mut().lock(1 | 4).await
+    }
+
+    /// Acquires an exclusive advisory lock through AFC.
+    pub async fn lock_exclusive(&mut self) -> Result<(), IdeviceError> {
+        self.inner.as_mut().lock(2 | 4).await
+    }
+
+    /// Releases an advisory AFC lock.
+    pub async fn unlock(&mut self) -> Result<(), IdeviceError> {
+        self.inner.as_mut().lock(8 | 4).await
+    }
+
     pub fn as_raw_fd(&self) -> u64 {
         self.inner.fd
     }

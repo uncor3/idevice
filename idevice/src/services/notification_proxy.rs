@@ -36,6 +36,53 @@ use tracing::warn;
 
 use crate::{HeartbeatError, Idevice, IdeviceError, IdeviceService, obf};
 
+/// The device asked the host to cancel the active sync/backup operation.
+pub const SYNC_CANCEL_REQUEST: &str = "com.apple.itunes-client.syncCancelRequest";
+/// Local Authentication UI was shown on the device, normally to request its passcode.
+pub const LOCAL_AUTHENTICATION_UI_PRESENTED: &str = "com.apple.LocalAuthentication.ui.presented";
+/// Local Authentication UI was dismissed on the device.
+pub const LOCAL_AUTHENTICATION_UI_DISMISSED: &str = "com.apple.LocalAuthentication.ui.dismissed";
+/// The device backup encryption domain changed.
+pub const BACKUP_DOMAIN_CHANGED: &str = "com.apple.mobile.backup.domain_changed";
+/// Announces that an iTunes-style synchronization operation is about to start.
+pub const SYNC_WILL_START: &str = "com.apple.itunes-mobdev.syncWillStart";
+/// Requests ownership of the device's synchronization lock.
+pub const SYNC_LOCK_REQUEST: &str = "com.apple.itunes-mobdev.syncLockRequest";
+/// Announces that the synchronization lock has been acquired.
+pub const SYNC_DID_START: &str = "com.apple.itunes-mobdev.syncDidStart";
+/// Announces that the synchronization operation and lock have finished.
+pub const SYNC_DID_FINISH: &str = "com.apple.itunes-mobdev.syncDidFinish";
+
+/// Device notifications relevant to a MobileBackup2 operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobileBackup2Notification {
+    CancelRequested,
+    PasscodeRequested,
+    PasscodeRequestDismissed,
+    BackupDomainChanged,
+}
+
+impl MobileBackup2Notification {
+    /// Converts a raw notification-proxy name into a backup event.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            SYNC_CANCEL_REQUEST => Some(Self::CancelRequested),
+            LOCAL_AUTHENTICATION_UI_PRESENTED => Some(Self::PasscodeRequested),
+            LOCAL_AUTHENTICATION_UI_DISMISSED => Some(Self::PasscodeRequestDismissed),
+            BACKUP_DOMAIN_CHANGED => Some(Self::BackupDomainChanged),
+            _ => None,
+        }
+    }
+}
+
+/// Notifications used by MobileBackup2 for cancellation and passcode UI state.
+pub const MOBILEBACKUP2_NOTIFICATIONS: &[&str] = &[
+    SYNC_CANCEL_REQUEST,
+    LOCAL_AUTHENTICATION_UI_PRESENTED,
+    LOCAL_AUTHENTICATION_UI_DISMISSED,
+    BACKUP_DOMAIN_CHANGED,
+];
+
 /// Client for interacting with the iOS notification proxy service
 ///
 /// The notification proxy service provides a mechanism to observe and post

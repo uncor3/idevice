@@ -4,7 +4,8 @@
 use idevice::{
     IdeviceError, IdeviceService,
     mobilebackup2::{
-        BackupDelegate, DirEntryInfo, FsBackupDelegate, MobileBackup2Client, RestoreOptions,
+        BackupDelegate, BackupOptions, DirEntryInfo, FsBackupDelegate, MobileBackup2Client,
+        RestoreOptions,
     },
     provider::IdeviceProvider,
 };
@@ -372,17 +373,11 @@ pub async fn main(arguments: &CollectedArguments, provider: Box<dyn IdeviceProvi
             let source = sub_args.next_argument::<String>();
             let source = source.as_deref();
 
-            let options = if sub_args.has_flag("full") {
-                let mut opts = plist::Dictionary::new();
-                opts.insert("ForceFullBackup".into(), plist::Value::Boolean(true));
-                Some(opts)
-            } else {
-                None
-            };
+            let options = BackupOptions::new().with_force_full_backup(sub_args.has_flag("full"));
 
             println!("Starting backup...");
             match backup_client
-                .backup_from_path(Path::new(&dir), source, options, &delegate)
+                .backup_from_path_with_options(Path::new(&dir), source, options, &delegate)
                 .await
             {
                 Ok(Some(response)) => {

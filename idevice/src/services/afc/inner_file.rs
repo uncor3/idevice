@@ -89,6 +89,18 @@ crate::impl_to_structs!(InnerFileDescriptor<'_>, OwnedInnerFileDescriptor; {
         this.client.read().await
     }
 
+    pub async fn lock(
+        mut self: Pin<&mut Self>,
+        operation: u64,
+    ) -> Result<(), IdeviceError> {
+        let mut header_payload = self.fd.to_le_bytes().to_vec();
+        header_payload.extend(operation.to_le_bytes());
+        self.as_mut()
+            .send_packet(AfcOpcode::FileLock, header_payload, Vec::new())
+            .await?;
+        Ok(())
+    }
+
     /// Returns the current cursor position for the file
     pub async fn seek_tell(self: Pin<&mut Self>) -> Result<u64, IdeviceError> {
         let header_payload = self.fd.to_le_bytes().to_vec();

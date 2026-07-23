@@ -12,7 +12,41 @@ use std::time::SystemTime;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, warn};
 
-use crate::{Idevice, IdeviceError, IdeviceService, obf};
+use crate::{
+    Idevice, IdeviceError, IdeviceService, lockdown::LockdownClient, obf, provider::IdeviceProvider,
+};
+
+/// Options controlling how a MobileBackup2 backup is created.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackupOptions {
+    force_full_backup: bool,
+}
+
+impl BackupOptions {
+    /// Creates options for a normal incremental backup.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Requests a full backup instead of reusing the existing snapshot.
+    pub fn with_force_full_backup(mut self, force: bool) -> Self {
+        self.force_full_backup = force;
+        self
+    }
+
+    /// Returns whether the device will be asked to create a full backup.
+    pub fn force_full_backup(&self) -> bool {
+        self.force_full_backup
+    }
+
+    fn to_plist(self) -> Dictionary {
+        let mut options = Dictionary::new();
+        if self.force_full_backup {
+            options.insert("ForceFullBackup".into(), plist::Value::Boolean(true));
+        }
+        options
+    }
+}
 
 /// DeviceLink message codes used in MobileBackup2 binary streams
 pub const DL_CODE_SUCCESS: u8 = 0x00;
@@ -364,6 +398,29 @@ impl IdeviceService for MobileBackup2Client {
         obf!("com.apple.mobilebackup2")
     }
 
+    async fn connect(provider: &dyn IdeviceProvider) -> Result<Self, IdeviceError> {
+        let pairing_file = provider.get_pairing_file().await?;
+        let mut lockdown = LockdownClient::connect(provider).await?;
+        let legacy = lockdown.start_session(&pairing_file).await?;
+        let udid = lockdown
+            .get_value(Some("UniqueDeviceID"), None)
+            .await
+            .ok()
+            .and_then(|value| value.as_string().map(str::to_owned));
+        let (port, ssl) = lockdown
+            .start_service_with_escrow(Self::service_name(), pairing_file.escrow_bag.clone())
+            .await?;
+
+        let mut idevice = provider.connect(port).await?;
+        if ssl {
+            idevice.start_session(&pairing_file, legacy).await?;
+        }
+        if let Some(udid) = udid {
+            idevice.set_udid(udid);
+        }
+        Self::from_stream(idevice).await
+    }
+
     async fn from_stream(idevice: Idevice) -> Result<Self, crate::IdeviceError> {
         let mut client = Self::new(idevice);
         // Perform DeviceLink handshake first
@@ -514,14 +571,19 @@ impl RestoreOptions {
     }
 
     pub fn to_plist(&self) -> Dictionary {
-        crate::plist!(dict {
-            "RestoreShouldReboot": self.reboot,
-            "RestoreDontCopyBackup": !self.copy,
+        let mut options = crate::plist!(dict {
             "RestorePreserveSettings": self.preserve_settings,
             "RestoreSystemFiles": self.system_files,
             "RemoveItemsNotRestored": self.remove_items_not_restored,
             "Password":? self.password.clone()
-        })
+        });
+        if !self.reboot {
+            options.insert("RestoreShouldReboot".into(), plist::Value::Boolean(false));
+        }
+        if !self.copy {
+            options.insert("RestoreDontCopyBackup".into(), plist::Value::Boolean(true));
+        }
+        options
     }
 }
 
@@ -1059,6 +1121,26 @@ impl MobileBackup2Client {
         self.process_dl_loop(backup_root, delegate).await
     }
 
+    /// High-level backup API using typed MobileBackup2 options.
+    ///
+    /// Use [`BackupOptions::with_force_full_backup`] to explicitly request a
+    /// full backup. The default options request the normal incremental path.
+    pub async fn backup_from_path_with_options(
+        &mut self,
+        backup_root: &Path,
+        source_identifier: Option<&str>,
+        options: BackupOptions,
+        delegate: &dyn BackupDelegate,
+    ) -> Result<Option<Dictionary>, IdeviceError> {
+        self.backup_from_path(
+            backup_root,
+            source_identifier,
+            Some(options.to_plist()),
+            delegate,
+        )
+        .await
+    }
+
     /// High-level API: Restore from a local backup directory using DeviceLink file exchange
     ///
     /// - `backup_root` should point to the backup root directory (which contains the `<SourceIdentifier>` subdirectory)
@@ -1144,6 +1226,14 @@ impl MobileBackup2Client {
                         0,
                         None,
                         Some(plist::Value::Integer(freespace.into())),
+                    )
+                    .await?;
+                }
+                "DLMessagePurgeDiskSpace" => {
+                    self.send_status_response(
+                        -1,
+                        Some("Operation not supported"),
+                        Some(plist::Value::Dictionary(Dictionary::new())),
                     )
                     .await?;
                 }
@@ -1690,14 +1780,17 @@ impl MobileBackup2Client {
         Ok(())
     }
 
-    /// Change backup password (enable/disable if new/old missing)
+    /// Change the device backup password.
+    ///
+    /// Returns the final MobileBackup2 process response so callers can validate
+    /// the device-reported error code (for example, an incorrect old password).
     pub async fn change_password_from_path(
         &mut self,
         backup_root: &Path,
         old: Option<&str>,
         new: Option<&str>,
         delegate: &dyn BackupDelegate,
-    ) -> Result<(), IdeviceError> {
+    ) -> Result<Option<Dictionary>, IdeviceError> {
         let target_udid = self.idevice.udid();
         let dict = crate::plist!(dict {
             "MessageName": "ChangePassword",
@@ -1707,8 +1800,7 @@ impl MobileBackup2Client {
         });
         self.send_device_link_message("ChangePassword", Some(dict))
             .await?;
-        let _ = self.process_dl_loop(backup_root, delegate).await?;
-        Ok(())
+        self.process_dl_loop(backup_root, delegate).await
     }
 
     /// Erase device via mobilebackup2
@@ -1851,5 +1943,53 @@ mod tests {
         let free =
             FsBackupDelegate.get_free_disk_space(Path::new("./does/not/exist/anywhere/right/now"));
         assert!(free > 0, "should resolve an existing ancestor, got {free}");
+    }
+
+    #[test]
+    fn restore_options_match_idevicebackup2_system_settings() {
+        let options = RestoreOptions::new()
+            .with_reboot(true)
+            .with_copy(false)
+            .with_preserve_settings(false)
+            .with_system_files(true)
+            .with_remove_items_not_restored(false)
+            .with_password("secret")
+            .to_plist();
+
+        assert_eq!(
+            options.get("RestoreSystemFiles"),
+            Some(&plist::Value::Boolean(true))
+        );
+        assert_eq!(
+            options.get("RestorePreserveSettings"),
+            Some(&plist::Value::Boolean(false))
+        );
+        assert_eq!(
+            options.get("RestoreDontCopyBackup"),
+            Some(&plist::Value::Boolean(true))
+        );
+        assert!(!options.contains_key("RestoreShouldReboot"));
+        assert_eq!(
+            options.get("RemoveItemsNotRestored"),
+            Some(&plist::Value::Boolean(false))
+        );
+        assert_eq!(
+            options.get("Password"),
+            Some(&plist::Value::String("secret".into()))
+        );
+    }
+
+    #[test]
+    fn restore_options_only_send_negative_reboot_and_dont_copy_flags() {
+        let options = RestoreOptions::new()
+            .with_reboot(false)
+            .with_copy(true)
+            .to_plist();
+
+        assert_eq!(
+            options.get("RestoreShouldReboot"),
+            Some(&plist::Value::Boolean(false))
+        );
+        assert!(!options.contains_key("RestoreDontCopyBackup"));
     }
 }
