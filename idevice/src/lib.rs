@@ -804,6 +804,8 @@ pub enum IdeviceError {
     UnexpectedResponse(String),
     #[error("this request was prohibited")]
     GetProhibited,
+    #[error("the requested value is missing")]
+    MissingValue,
     #[error("unknown error `{0}` returned from device")]
     UnknownErrorType(String),
     #[error("internal error")]
@@ -943,6 +945,7 @@ impl IdeviceError {
         }
         match e {
             "GetProhibited" => Some(Self::GetProhibited),
+            "MissingValue" => Some(Self::MissingValue),
             "InvalidHostID" => Some(Self::InvalidHostID),
             "SessionInactive" => Some(Self::SessionInactive),
             "DeviceLocked" => Some(Self::DeviceLocked),
@@ -1008,6 +1011,7 @@ impl IdeviceError {
             // 13: Protocol/device response
             IdeviceError::UnexpectedResponse(_) => 13,
             IdeviceError::GetProhibited => 14,
+            IdeviceError::MissingValue => 37,
             IdeviceError::UnknownErrorType(_) => 15,
             IdeviceError::InternalError(_) => 16,
 
