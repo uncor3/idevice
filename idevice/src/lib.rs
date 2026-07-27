@@ -56,8 +56,9 @@ use provider::{IdeviceProvider, RsdProvider};
 use rustls::{crypto::CryptoProvider, pki_types::ServerName};
 use std::{
     io::{self, BufWriter},
-    sync::Arc,
 };
+#[cfg(feature = "rustls")]
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace};
@@ -153,7 +154,9 @@ pub type IdeviceSocket = Box<dyn ReadWrite>;
 /// Installs a process-default rustls [`CryptoProvider`] matching the selected
 /// crypto backend (`ring` / `aws-lc` / `wasm-crypto`), unless one is already
 /// installed.
+#[allow(dead_code)]
 pub(crate) fn ensure_default_crypto_provider() {
+    // when not using rustls, this function is unused
     #[cfg(feature = "rustls")]
     {
         if CryptoProvider::get_default().is_none() {
