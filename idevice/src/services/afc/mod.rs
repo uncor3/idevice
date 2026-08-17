@@ -3,7 +3,7 @@
 //! This module provides functionality to interact with the file system of iOS devices
 //! through the AFC protocol.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use errors::AfcError;
 use opcode::{AfcFopenMode, AfcOpcode};
@@ -52,6 +52,22 @@ pub struct FileInfo {
     pub st_ifmt: String,
     /// Target path if this is a symbolic link
     pub st_link_target: Option<String>,
+}
+
+/// Metadata for an AFC path after resolving all symbolic links in the path.
+///
+/// Unlike [`AfcClient::get_file_info`], this resolves symbolic links in both
+/// intermediate path components and the final component. `requested_path`
+/// preserves the caller's input, while `resolved_path` is the normalized,
+/// absolute path of the final target in the current AFC service namespace.
+#[derive(Clone, Debug)]
+pub struct ResolvedFileInfo {
+    /// Path supplied by the caller.
+    pub requested_path: String,
+    /// Normalized final target path after resolving symbolic links.
+    pub resolved_path: String,
+    /// Metadata for the final target.
+    pub info: FileInfo,
 }
 
 /// Information about the device's filesystem
@@ -251,7 +267,10 @@ impl AfcClient {
 
         let st_nlink = kvs.remove("st_nlink").ok_or(AfcError::MissingAttribute)?;
         let st_ifmt = kvs.remove("st_ifmt").ok_or(AfcError::MissingAttribute)?;
-        let st_link_target = kvs.remove("st_link_target");
+        // for some reason st_link_target was being used; AFC reports this field as LinkTarget.
+        let st_link_target = kvs
+            .remove("LinkTarget")
+            .or_else(|| kvs.remove("st_link_target"));
 
         if !kvs.is_empty() {
             warn!("File info kvs not empty: {kvs:?}");
@@ -265,6 +284,88 @@ impl AfcClient {
             st_nlink,
             st_ifmt,
             st_link_target,
+        })
+    }
+
+    /// Resolves symbolic links in an AFC path and returns the normalized final path.
+    ///
+    /// Relative symbolic-link targets are interpreted relative to the directory
+    /// containing the link. Absolute targets are interpreted from the root of
+    /// the current AFC service namespace. Resolution is limited to 40 symbolic
+    /// links and fails if a cycle is detected or a link has no target.
+    pub async fn resolve_path(&mut self, path: impl Into<String>) -> Result<String, IdeviceError> {
+        const MAX_SYMLINKS: usize = 40;
+
+        let requested_path = path.into();
+        let mut pending = normalize_afc_path_components(&[], &requested_path)?;
+        let mut resolved = Vec::new();
+        let mut visited_links = HashSet::new();
+        let mut followed_links = 0_usize;
+
+        while let Some(component) = pending.pop_front() {
+            let candidate = afc_path_from_components(
+                resolved
+                    .iter()
+                    .map(String::as_str)
+                    .chain(std::iter::once(component.as_str())),
+            );
+            let info = self.get_file_info(&candidate).await?;
+
+            if info.st_ifmt != "S_IFLNK" {
+                resolved.push(component);
+                continue;
+            }
+
+            followed_links += 1;
+            if followed_links > MAX_SYMLINKS {
+                return Err(IdeviceError::UnexpectedResponse(format!(
+                    "AFC symbolic-link resolution exceeded {MAX_SYMLINKS} links for {requested_path}"
+                )));
+            }
+            if !visited_links.insert(candidate.clone()) {
+                return Err(IdeviceError::UnexpectedResponse(format!(
+                    "AFC symbolic-link cycle detected at {candidate}"
+                )));
+            }
+
+            let target = info.st_link_target.ok_or_else(|| {
+                IdeviceError::UnexpectedResponse(format!(
+                    "AFC symbolic link {candidate} has no st_link_target"
+                ))
+            })?;
+            let base = if target.starts_with('/') {
+                &[][..]
+            } else {
+                resolved.as_slice()
+            };
+            let mut expanded = normalize_afc_path_components(base, &target)?;
+            expanded.extend(pending);
+            pending = expanded;
+            resolved.clear();
+        }
+
+        Ok(afc_path_from_components(
+            resolved.iter().map(String::as_str),
+        ))
+    }
+
+    /// Retrieves metadata for the final target after resolving symbolic links.
+    ///
+    /// This resolves symbolic links in every component of the requested path.
+    /// Use [`AfcClient::get_file_info`] when metadata for a symbolic link itself
+    /// is required, such as before deleting or renaming the link.
+    pub async fn get_file_info_resolved(
+        &mut self,
+        path: impl Into<String>,
+    ) -> Result<ResolvedFileInfo, IdeviceError> {
+        let requested_path = path.into();
+        let resolved_path = self.resolve_path(&requested_path).await?;
+        let info = self.get_file_info(&resolved_path).await?;
+
+        Ok(ResolvedFileInfo {
+            requested_path,
+            resolved_path,
+            info,
         })
     }
 
@@ -602,6 +703,73 @@ impl AfcClient {
         let packet = packet.serialize();
         self.idevice.send_raw(&packet).await?;
         Ok(())
+    }
+}
+
+fn normalize_afc_path_components(
+    base: &[String],
+    path: &str,
+) -> Result<VecDeque<String>, IdeviceError> {
+    if path.contains('\0') {
+        return Err(IdeviceError::UnexpectedResponse(
+            "AFC path contains a NUL byte".into(),
+        ));
+    }
+
+    let mut components = if path.starts_with('/') {
+        Vec::new()
+    } else {
+        base.to_vec()
+    };
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            _ => components.push(component.to_string()),
+        }
+    }
+    Ok(components.into())
+}
+
+fn afc_path_from_components<'a>(components: impl Iterator<Item = &'a str>) -> String {
+    let mut path = String::from("/");
+    path.push_str(&components.collect::<Vec<_>>().join("/"));
+    path
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{afc_path_from_components, normalize_afc_path_components};
+
+    fn normalize(base: &[&str], path: &str) -> String {
+        let base = base
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>();
+        let components = normalize_afc_path_components(&base, path).unwrap();
+        afc_path_from_components(components.iter().map(String::as_str))
+    }
+
+    #[test]
+    fn normalizes_absolute_afc_paths() {
+        assert_eq!(
+            normalize(&["ignored"], "/private//var/./mobile"),
+            "/private/var/mobile"
+        );
+        assert_eq!(normalize(&[], "/../../var"), "/var");
+    }
+
+    #[test]
+    fn resolves_relative_targets_against_the_link_parent() {
+        assert_eq!(normalize(&["private", "var"], "../etc"), "/private/etc");
+        assert_eq!(normalize(&["a"], r"directory\name"), r"/a/directory\name");
+    }
+
+    #[test]
+    fn rejects_nul_bytes() {
+        assert!(normalize_afc_path_components(&[], "bad\0path").is_err());
     }
 }
 
