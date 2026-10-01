@@ -23,6 +23,7 @@ mod inner_file;
 mod inner_file_impl_macro;
 pub mod opcode;
 pub mod packet;
+pub mod shared_file;
 
 /// The magic number used in AFC protocol communications
 pub const MAGIC: u64 = 0x4141504c36414643;
@@ -97,6 +98,76 @@ impl IdeviceService for AfcClient {
 }
 
 impl AfcClient {
+    /// Sends one file-related AFC request and reads its matching response.
+    ///
+    /// This constructs the packet header, assigns and advances the client's
+    /// packet number, sends the packet, and waits for the next AFC response.
+    /// Callers must provide the operation-specific header payload and optional
+    /// body payload in their wire-format representation.
+    ///
+    /// The mutable client borrow keeps the send/receive pair together so a
+    /// different request cannot consume this operation's response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the request fails, reading its response
+    /// fails, or the device reports an AFC protocol error.
+    pub(crate) async fn file_request(
+        &mut self,
+        operation: AfcOpcode,
+        header_payload: Vec<u8>,
+        payload: Vec<u8>,
+    ) -> Result<AfcPacket, IdeviceError> {
+        let header_len = header_payload.len() as u64 + AfcPacketHeader::LEN;
+        let header = AfcPacketHeader {
+            magic: MAGIC,
+            entire_len: header_len + payload.len() as u64,
+            header_payload_len: header_len,
+            packet_num: self.package_number,
+            operation,
+        };
+        self.package_number += 1;
+
+        self.send(AfcPacket {
+            header,
+            header_payload,
+            payload,
+        })
+        .await?;
+        self.read().await
+    }
+
+    /// Opens a device-side AFC file and returns its remote handle.
+    ///
+    /// The request header payload contains the little-endian open mode followed
+    /// by the path bytes, matching [`Self::open`] and [`Self::open_owned`]. The
+    /// first eight response bytes contain the little-endian AFC file handle.
+    ///
+    /// This only opens the remote handle; the caller remains responsible for
+    /// eventually sending `FileClose` for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or when the response does not
+    /// contain a complete eight-byte file handle.
+    async fn open_handle(&mut self, path: &str, mode: AfcFopenMode) -> Result<u64, IdeviceError> {
+        let mut header_payload = (mode as u64).to_le_bytes().to_vec();
+        header_payload.extend(path.as_bytes());
+
+        let response = self
+            .file_request(AfcOpcode::FileOpen, header_payload, Vec::new())
+            .await?;
+
+        let fd_bytes = response.header_payload.get(..8).ok_or_else(|| {
+            warn!("Header payload fd is less than 8 bytes");
+            IdeviceError::UnexpectedResponse(
+                "AFC FileOpen response header payload too short for fd".into(),
+            )
+        })?;
+
+        Ok(u64::from_le_bytes(fd_bytes.try_into().unwrap()))
+    }
+
     /// Creates a new AFC client from an existing iDevice connection
     ///
     /// # Arguments
@@ -506,34 +577,7 @@ impl AfcClient {
         mode: AfcFopenMode,
     ) -> Result<FileDescriptor<'f>, IdeviceError> {
         let path = path.into();
-        let mut header_payload = (mode as u64).to_le_bytes().to_vec();
-        header_payload.extend(path.as_bytes());
-        let header_len = header_payload.len() as u64 + AfcPacketHeader::LEN;
-
-        let header = AfcPacketHeader {
-            magic: MAGIC,
-            entire_len: header_len, // it's the same since the payload is empty for this
-            header_payload_len: header_len,
-            packet_num: self.package_number,
-            operation: AfcOpcode::FileOpen,
-        };
-        self.package_number += 1;
-
-        let packet = AfcPacket {
-            header,
-            header_payload,
-            payload: Vec::new(),
-        };
-
-        self.send(packet).await?;
-        let res = self.read().await?;
-        if res.header_payload.len() < 8 {
-            warn!("Header payload fd is less than 8 bytes");
-            return Err(IdeviceError::UnexpectedResponse(
-                "AFC FileOpen response header payload too short for fd".into(),
-            ));
-        }
-        let fd = u64::from_le_bytes(res.header_payload[..8].try_into().unwrap());
+        let fd = self.open_handle(&path, mode).await?;
 
         // we know it's a valid fd
         Ok(unsafe { FileDescriptor::new(self, fd, path) })
@@ -553,34 +597,7 @@ impl AfcClient {
         mode: AfcFopenMode,
     ) -> Result<OwnedFileDescriptor, IdeviceError> {
         let path = path.into();
-        let mut header_payload = (mode as u64).to_le_bytes().to_vec();
-        header_payload.extend(path.as_bytes());
-        let header_len = header_payload.len() as u64 + AfcPacketHeader::LEN;
-
-        let header = AfcPacketHeader {
-            magic: MAGIC,
-            entire_len: header_len, // it's the same since the payload is empty for this
-            header_payload_len: header_len,
-            packet_num: self.package_number,
-            operation: AfcOpcode::FileOpen,
-        };
-        self.package_number += 1;
-
-        let packet = AfcPacket {
-            header,
-            header_payload,
-            payload: Vec::new(),
-        };
-
-        self.send(packet).await?;
-        let res = self.read().await?;
-        if res.header_payload.len() < 8 {
-            warn!("Header payload fd is less than 8 bytes");
-            return Err(IdeviceError::UnexpectedResponse(
-                "AFC FileOpen response header payload too short for fd".into(),
-            ));
-        }
-        let fd = u64::from_le_bytes(res.header_payload[..8].try_into().unwrap());
+        let fd = self.open_handle(&path, mode).await?;
 
         // we know it's a valid fd
         Ok(unsafe { OwnedFileDescriptor::new(self, fd, path) })

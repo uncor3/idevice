@@ -7,11 +7,7 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::{
     IdeviceError,
-    afc::{
-        AfcClient, MAGIC,
-        opcode::AfcOpcode,
-        packet::{AfcPacket, AfcPacketHeader},
-    },
+    afc::{AfcClient, opcode::AfcOpcode, packet::AfcPacket},
 };
 
 /// Maximum transfer size for file operations (1MB)
@@ -68,25 +64,9 @@ crate::impl_to_structs!(InnerFileDescriptor<'_>, OwnedInnerFileDescriptor; {
     ) -> Result<AfcPacket, IdeviceError> {
         // SAFETY: we don't modify pinned fileds, it's ok
         let this = unsafe { self.get_unchecked_mut() };
-
-        let header_len = header_payload.len() as u64 + AfcPacketHeader::LEN;
-        let header = AfcPacketHeader {
-            magic: MAGIC,
-            entire_len: header_len + payload.len() as u64,
-            header_payload_len: header_len,
-            packet_num: this.client.package_number,
-            operation: opcode,
-        };
-        this.client.package_number += 1;
-
-        let packet = AfcPacket {
-            header,
-            header_payload,
-            payload,
-        };
-
-        this.client.send(packet).await?;
-        this.client.read().await
+        this.client
+            .file_request(opcode, header_payload, payload)
+            .await
     }
 
     pub async fn lock(
