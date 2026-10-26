@@ -69,18 +69,6 @@ crate::impl_to_structs!(InnerFileDescriptor<'_>, OwnedInnerFileDescriptor; {
             .await
     }
 
-    pub async fn lock(
-        mut self: Pin<&mut Self>,
-        operation: u64,
-    ) -> Result<(), IdeviceError> {
-        let mut header_payload = self.fd.to_le_bytes().to_vec();
-        header_payload.extend(operation.to_le_bytes());
-        self.as_mut()
-            .send_packet(AfcOpcode::FileLock, header_payload, Vec::new())
-            .await?;
-        Ok(())
-    }
-
     /// Returns the current cursor position for the file
     pub async fn seek_tell(self: Pin<&mut Self>) -> Result<u64, IdeviceError> {
         let header_payload = self.fd.to_le_bytes().to_vec();
@@ -188,6 +176,33 @@ crate::impl_to_structs!(InnerFileDescriptor<'_>, OwnedInnerFileDescriptor; {
                 .send_packet(AfcOpcode::Write, header_payload, chunk.to_vec())
                 .await?;
         }
+        Ok(())
+    }
+
+    /// Applies an flock(2)-style lock to the file (AFC FileRefLock, opcode 0x1B)
+    ///
+    /// # Arguments
+    /// * `op` - The lock operation to apply (shared/exclusive lock, or unlock)
+    pub async fn lock(
+        mut self: Pin<&mut Self>,
+        op: u64,
+    ) -> Result<(), IdeviceError> {
+        let header_payload = [self.fd.to_le_bytes(), op.to_le_bytes()].concat();
+        self.as_mut()
+            .send_packet(AfcOpcode::FileLock, header_payload, Vec::new())
+            .await?;
+        Ok(())
+    }
+
+    /// Sets the size of the file, truncating or extending it (AFC FileRefSetFileSize, opcode 0x15)
+    ///
+    /// # Arguments
+    /// * `size` - The new size of the file in bytes
+    pub async fn set_size(mut self: Pin<&mut Self>, size: u64) -> Result<(), IdeviceError> {
+        let header_payload = [self.fd.to_le_bytes(), size.to_le_bytes()].concat();
+        self.as_mut()
+            .send_packet(AfcOpcode::FileSetSize, header_payload, Vec::new())
+            .await?;
         Ok(())
     }
 
@@ -389,7 +404,6 @@ crate::impl_trait_to_structs!(AsyncWrite for InnerFileDescriptor<'_>, OwnedInner
         match std::task::ready!(write_func.as_mut().poll(cx)) {
             Ok(PendingResult::Empty) => self.as_mut().remove_pending_fut(),
             Err(e) => {
-                println!("error: {e}");
                 return std::task::Poll::Ready(Err(std::io::Error::other(e.to_string())));
             }
 

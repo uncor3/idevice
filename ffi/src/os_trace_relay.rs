@@ -2,15 +2,15 @@ use std::os::raw::c_char;
 use std::{ffi::CString, ptr::null_mut};
 
 use idevice::{
-    IdeviceError, IdeviceService, RsdService, os_trace_relay::OsTraceRelayClient,
-    provider::IdeviceProvider,
+    IdeviceError, IdeviceService, os_trace_relay::OsTraceRelayClient, provider::IdeviceProvider,
 };
 
 use crate::run_sync_local;
-use crate::{
-    IdeviceFfiError, core_device_proxy::AdapterHandle, ffi_err, provider::IdeviceProviderHandle,
-    rsd::RsdHandshakeHandle,
-};
+use crate::{IdeviceFfiError, ffi_err, provider::IdeviceProviderHandle};
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
+use crate::{core_device_proxy::AdapterHandle, rsd::RsdHandshakeHandle};
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
+use idevice::RsdService as _;
 
 pub struct OsTraceRelayClientHandle(pub OsTraceRelayClient);
 pub struct OsTraceRelayReceiverHandle(pub idevice::os_trace_relay::OsTraceRelayReceiver);
@@ -25,6 +25,20 @@ pub struct OsTraceLog {
     pub filename: *const c_char,
     pub message: *const c_char,
     pub label: *const SyslogLabel,
+    /// Unique process ID (the activity stream's `procid` field). Equals `pid`
+    /// in practice on iOS.
+    pub procid: u64,
+    /// ID of the thread that emitted the entry
+    pub thread_id: u64,
+    /// Load address offset of the log call site within the sender image. Pair
+    /// with `image_uuid` to symbolicate.
+    pub image_offset: u32,
+    /// UUID of the sender image, i.e. the one named by `image_name`
+    pub image_uuid: [u8; 16],
+    /// UUID of the process' main executable, i.e. the one named by `filename`
+    pub process_image_uuid: [u8; 16],
+    /// Raw monotonic device timestamp in mach ticks
+    pub mach_timestamp: u64,
 }
 
 #[repr(C)]
@@ -35,6 +49,9 @@ pub struct SyslogLabel {
 }
 
 /// Connects to the relay with the given provider
+///
+/// The caller retains ownership of `provider` on both success and failure and
+/// must free it with `idevice_provider_free` when it is no longer needed.
 ///
 /// # Arguments
 /// * [`provider`] - A provider created by this library
@@ -66,10 +83,7 @@ pub unsafe extern "C" fn os_trace_relay_connect(
             unsafe { *client = Box::into_raw(boxed) };
             null_mut()
         }
-        Err(e) => {
-            let _ = unsafe { Box::from_raw(provider) };
-            ffi_err!(e)
-        }
+        Err(e) => ffi_err!(e),
     }
 }
 
@@ -87,6 +101,7 @@ pub unsafe extern "C" fn os_trace_relay_connect(
 /// `provider` must be a valid pointer to a handle allocated by this library
 /// `handshake` must be a valid pointer to a handle allocated by this library
 /// `client` must be a valid, non-null pointer to a location where the handle will be stored
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn os_trace_relay_connect_rsd(
     provider: *mut AdapterHandle,
@@ -253,6 +268,12 @@ pub unsafe extern "C" fn os_trace_relay_next(
                 } else {
                     std::ptr::null()
                 },
+                procid: r.procid,
+                thread_id: r.thread_id,
+                image_offset: r.image_offset,
+                image_uuid: *r.image_uuid.as_bytes(),
+                process_image_uuid: *r.process_image_uuid.as_bytes(),
+                mach_timestamp: r.mach_timestamp,
             });
 
             unsafe { *log = Box::into_raw(log_entry) };

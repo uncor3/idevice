@@ -3,20 +3,25 @@
 use std::{ffi::c_void, ptr::null_mut};
 
 use idevice::{
-    IdeviceError, IdeviceService, RsdService, mobile_image_mounter::ImageMounter,
-    provider::IdeviceProvider,
+    IdeviceError, IdeviceService, mobile_image_mounter::ImageMounter, provider::IdeviceProvider,
 };
 use plist::Value;
 use plist_ffi::{PlistWrapper, plist_t};
 
 use crate::{
-    IdeviceFfiError, IdeviceHandle, core_device_proxy::AdapterHandle, ffi_err,
-    provider::IdeviceProviderHandle, rsd::RsdHandshakeHandle, run_sync_local,
+    IdeviceFfiError, IdeviceHandle, ffi_err, provider::IdeviceProviderHandle, run_sync_local,
 };
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
+use crate::{core_device_proxy::AdapterHandle, rsd::RsdHandshakeHandle};
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
+use idevice::RsdService as _;
 
 pub struct ImageMounterHandle(pub ImageMounter);
 
 /// Connects to the Image Mounter service using a provider
+///
+/// The caller retains ownership of `provider` on both success and failure and
+/// must free it with `idevice_provider_free` when it is no longer needed.
 ///
 /// # Arguments
 /// * [`provider`] - An IdeviceProvider
@@ -49,10 +54,7 @@ pub unsafe extern "C" fn image_mounter_connect(
             unsafe { *client = Box::into_raw(boxed) };
             null_mut()
         }
-        Err(e) => {
-            let _ = unsafe { Box::from_raw(provider) };
-            ffi_err!(e)
-        }
+        Err(e) => ffi_err!(e),
     }
 }
 
@@ -70,6 +72,7 @@ pub unsafe extern "C" fn image_mounter_connect(
 /// `provider` must be a valid pointer to a handle allocated by this library
 /// `handshake` must be a valid pointer to a handle allocated by this library
 /// `client` must be a valid, non-null pointer to a location where the handle will be stored
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn image_mounter_connect_rsd(
     provider: *mut AdapterHandle,
@@ -301,6 +304,8 @@ pub unsafe extern "C" fn image_mounter_upload_image(
 /// # Safety
 /// All pointers must be valid (except optional ones which can be null)
 /// `image_type` must be a valid null-terminated C string
+/// `info_plist` must be a valid plist or NULL. It is borrowed, not consumed,
+/// on both success and failure. Ownership of the original plist is unchanged.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn image_mounter_mount_image(
     client: *mut ImageMounterHandle,
@@ -330,8 +335,8 @@ pub unsafe extern "C" fn image_mounter_mount_image(
 
     let info_plist = if !info_plist.is_null() {
         Some(
-            unsafe { Box::from_raw(info_plist as *mut Value) }
-                .as_ref()
+            unsafe { &mut *(info_plist as *mut PlistWrapper) }
+                .borrow_self()
                 .clone(),
         )
     } else {
@@ -702,6 +707,8 @@ pub unsafe extern "C" fn image_mounter_roll_cryptex_nonce(
 ///
 /// # Safety
 /// All pointers must be valid (except optional ones which can be null)
+/// `info_plist` must be a valid plist or NULL. It is borrowed, not consumed,
+/// on both success and failure. Ownership of the original plist is unchanged.
 #[cfg(feature = "tss")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn image_mounter_mount_personalized(
@@ -727,8 +734,8 @@ pub unsafe extern "C" fn image_mounter_mount_personalized(
 
     let info_plist = if !info_plist.is_null() {
         Some(
-            unsafe { Box::from_raw(info_plist as *mut Value) }
-                .as_ref()
+            unsafe { &mut *(info_plist as *mut PlistWrapper) }
+                .borrow_self()
                 .clone(),
         )
     } else {
@@ -776,6 +783,8 @@ pub unsafe extern "C" fn image_mounter_mount_personalized(
 ///
 /// # Safety
 /// All pointers must be valid (except optional ones which can be null)
+/// `info_plist` must be a valid plist or NULL. It is borrowed, not consumed,
+/// on both success and failure. Ownership of the original plist is unchanged.
 #[cfg(feature = "tss")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn image_mounter_mount_personalized_rsd(
@@ -807,8 +816,8 @@ pub unsafe extern "C" fn image_mounter_mount_personalized_rsd(
 
     let info_plist = if !info_plist.is_null() {
         Some(
-            unsafe { Box::from_raw(info_plist as *mut Value) }
-                .as_ref()
+            unsafe { &mut *(info_plist as *mut PlistWrapper) }
+                .borrow_self()
                 .clone(),
         )
     } else {
@@ -860,6 +869,8 @@ pub unsafe extern "C" fn image_mounter_mount_personalized_rsd(
 ///
 /// # Safety
 /// All pointers must be valid (except optional ones which can be null)
+/// `info_plist` must be a valid plist or NULL. It is borrowed, not consumed,
+/// on both success and failure. Ownership of the original plist is unchanged.
 #[cfg(feature = "tss")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn image_mounter_mount_personalized_with_callback_rsd(
@@ -893,8 +904,8 @@ pub unsafe extern "C" fn image_mounter_mount_personalized_with_callback_rsd(
 
     let info_plist = if !info_plist.is_null() {
         Some(
-            unsafe { Box::from_raw(info_plist as *mut Value) }
-                .as_ref()
+            unsafe { &mut *(info_plist as *mut PlistWrapper) }
+                .borrow_self()
                 .clone(),
         )
     } else {
@@ -952,6 +963,8 @@ pub unsafe extern "C" fn image_mounter_mount_personalized_with_callback_rsd(
 ///
 /// # Safety
 /// All pointers must be valid (except optional ones which can be null)
+/// `info_plist` must be a valid plist or NULL. It is borrowed, not consumed,
+/// on both success and failure. Ownership of the original plist is unchanged.
 #[cfg(feature = "tss")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn image_mounter_mount_personalized_with_callback(
@@ -979,8 +992,8 @@ pub unsafe extern "C" fn image_mounter_mount_personalized_with_callback(
 
     let info_plist = if !info_plist.is_null() {
         Some(
-            unsafe { Box::from_raw(info_plist as *mut Value) }
-                .as_ref()
+            unsafe { &mut *(info_plist as *mut PlistWrapper) }
+                .borrow_self()
                 .clone(),
         )
     } else {

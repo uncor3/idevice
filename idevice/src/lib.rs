@@ -6,6 +6,9 @@
 #[cfg(feature = "pair")]
 mod ca;
 pub mod cursor;
+pub mod darwin_errno;
+#[cfg(feature = "_http")]
+pub mod http;
 #[cfg(feature = "mdns")]
 pub mod mdns;
 mod obfuscation;
@@ -54,9 +57,7 @@ use plist_macro::{plist, pretty_print_dictionary, pretty_print_plist};
 use provider::{IdeviceProvider, RsdProvider};
 #[cfg(feature = "rustls")]
 use rustls::{crypto::CryptoProvider, pki_types::ServerName};
-use std::{
-    io::{self, BufWriter},
-};
+use std::io::{self, BufWriter};
 #[cfg(feature = "rustls")]
 use std::sync::Arc;
 use thiserror::Error;
@@ -152,65 +153,45 @@ pub trait RsdService: Sized {
 pub type IdeviceSocket = Box<dyn ReadWrite>;
 
 /// Installs a process-default rustls [`CryptoProvider`] matching the selected
-/// crypto backend (`ring` / `aws-lc` / `wasm-crypto`), unless one is already
+/// crypto backend (`ring` / `aws-lc` / `rustcrypto`), unless one is already
 /// installed.
-#[allow(dead_code)]
+///
+/// When more than one backend feature is enabled, the priority is
+/// `ring` > `aws-lc` > `rustcrypto`. `rustcrypto` is pure Rust and works on
+/// every target (including wasm32), while `ring`/`aws-lc` require a C toolchain.
 pub(crate) fn ensure_default_crypto_provider() {
-    // when not using rustls, this function is unused
-    #[cfg(feature = "rustls")]
+    #[cfg(all(
+        feature = "rustls",
+        any(feature = "ring", feature = "aws-lc", feature = "rustcrypto")
+    ))]
     {
         if CryptoProvider::get_default().is_none() {
             // rust-analyzer will choke on this block, don't worry about it
             let crypto_provider: CryptoProvider = {
-                #[cfg(all(feature = "ring", not(feature = "aws-lc")))]
+                #[cfg(feature = "ring")]
                 {
+                    #[cfg(any(feature = "aws-lc", feature = "rustcrypto"))]
+                    tracing::warn!(
+                        "Multiple crypto backends selected; using ring (priority ring > aws-lc > rustcrypto)"
+                    );
                     debug!("Using ring crypto backend");
                     rustls::crypto::ring::default_provider()
                 }
 
                 #[cfg(all(feature = "aws-lc", not(feature = "ring")))]
                 {
+                    #[cfg(feature = "rustcrypto")]
+                    tracing::warn!(
+                        "Multiple crypto backends selected; using aws-lc (priority ring > aws-lc > rustcrypto)"
+                    );
                     debug!("Using aws-lc crypto backend");
                     rustls::crypto::aws_lc_rs::default_provider()
                 }
 
-                #[cfg(all(
-                    target_arch = "wasm32",
-                    feature = "wasm-crypto",
-                    not(any(feature = "ring", feature = "aws-lc"))
-                ))]
+                #[cfg(all(feature = "rustcrypto", not(any(feature = "ring", feature = "aws-lc"))))]
                 {
                     debug!("Using rustls-rustcrypto (pure Rust) crypto backend");
                     rustls_rustcrypto::provider()
-                }
-
-                #[cfg(all(
-                    not(target_arch = "wasm32"),
-                    not(any(feature = "ring", feature = "aws-lc"))
-                ))]
-                {
-                    compile_error!(
-                        "No crypto backend was selected! Specify an idevice feature for a crypto backend"
-                    );
-                }
-                #[cfg(all(
-                    target_arch = "wasm32",
-                    not(any(feature = "ring", feature = "aws-lc", feature = "wasm-crypto"))
-                ))]
-                {
-                    compile_error!(
-                        "No crypto backend was selected! On wasm32 enable the `wasm-crypto` (or `wasm`) feature."
-                    );
-                }
-
-                #[cfg(all(feature = "ring", feature = "aws-lc"))]
-                {
-                    // We can't throw a compile error because it breaks rust-analyzer.
-                    // My sanity while debugging the workspace crates are more important.
-
-                    debug!("Using ring crypto backend, because both were passed");
-                    tracing::warn!("Both ring && aws-lc are selected as idevice crypto backends!");
-                    rustls::crypto::ring::default_provider()
                 }
             };
 
@@ -222,6 +203,17 @@ pub(crate) fn ensure_default_crypto_provider() {
             }
         }
     }
+
+    // `rustls` is enabled (directly, or by a rustls-based feature) but no rustls
+    // provider backend was selected. openssl supplies no rustls provider, so this
+    // only ever fires without it.
+    #[cfg(all(
+        feature = "rustls",
+        not(any(feature = "ring", feature = "aws-lc", feature = "rustcrypto"))
+    ))]
+    compile_error!(
+        "The `rustls` TLS backend is enabled but no crypto provider was selected. Enable one of `aws-lc`, `ring`, or `rustcrypto` (`rustcrypto` is pure Rust and the only option on wasm32)."
+    );
 }
 
 /// Main handle for communicating with an iOS device
@@ -795,9 +787,9 @@ pub enum IdeviceError {
     NotEnoughBytes(usize, usize),
     #[error("integer overflow")]
     IntegerOverflow,
-    #[cfg(feature = "_reqwest")]
-    #[error("http reqwest error")]
-    Reqwest(#[from] reqwest::Error),
+    #[cfg(feature = "_http")]
+    #[error("HTTP request failed: {0}")]
+    Http(String),
 
     // 3: Protocol/device response errors
     #[error("unexpected response from device: {0}")]
@@ -896,6 +888,9 @@ pub enum IdeviceError {
     #[cfg(feature = "core_device")]
     #[error(transparent)]
     CoreDevice(#[from] services::core_device::CoreDeviceError),
+    #[cfg(feature = "cryptexd")]
+    #[error(transparent)]
+    Cryptexd(#[from] services::cryptexd::CryptexdError),
 
     // Feature-gated service errors (single-variant, not worth a sub-enum)
     #[cfg(feature = "misagent")]
@@ -1005,8 +1000,8 @@ impl IdeviceError {
             IdeviceError::AddrParseError(_) => 9,
             IdeviceError::NotEnoughBytes(_, _) => 10,
             IdeviceError::IntegerOverflow => 11,
-            #[cfg(feature = "_reqwest")]
-            IdeviceError::Reqwest(_) => 12,
+            #[cfg(feature = "_http")]
+            IdeviceError::Http(_) => 12,
 
             // 13: Protocol/device response
             IdeviceError::UnexpectedResponse(_) => 13,
@@ -1067,6 +1062,8 @@ impl IdeviceError {
             IdeviceError::InstallationProxy(_) => 107,
             #[cfg(feature = "core_device")]
             IdeviceError::CoreDevice(_) => 108,
+            #[cfg(feature = "cryptexd")]
+            IdeviceError::Cryptexd(_) => 110,
 
             // 200+: Feature-gated single-variant service errors
             #[cfg(feature = "misagent")]
@@ -1089,7 +1086,6 @@ impl IdeviceError {
             // 208: Restore (see RestoreError::sub_code for the specific failure)
             #[cfg(any(feature = "restore", feature = "preboard_service"))]
             IdeviceError::Restore(_) => 208,
-
         }
     }
 
@@ -1112,6 +1108,8 @@ impl IdeviceError {
             IdeviceError::InstallationProxy(e) => e.sub_code(),
             #[cfg(feature = "core_device")]
             IdeviceError::CoreDevice(e) => e.sub_code(),
+            #[cfg(feature = "cryptexd")]
+            IdeviceError::Cryptexd(e) => e.sub_code(),
             #[cfg(any(feature = "restore", feature = "preboard_service"))]
             IdeviceError::Restore(e) => e.sub_code(),
             _ => 0,

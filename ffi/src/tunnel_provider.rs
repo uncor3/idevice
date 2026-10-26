@@ -19,7 +19,7 @@ use idevice::{
 };
 
 use crate::core_device_proxy::AdapterHandle;
-use crate::rp_pairing_file::RpPairingFileHandle;
+use crate::rp_pairing_file::{RpPairingFileHandle, RpPairingPeerDeviceC, peer_device_to_c};
 use crate::rsd::RsdHandshakeHandle;
 use crate::run_global_timeout;
 use crate::util::{SockAddr, idevice_sockaddr, idevice_socklen_t};
@@ -62,7 +62,7 @@ async fn finish_tunnel(
 
     let raw = tunnel.into_inner();
     let mut adapter = idevice::tcp::adapter::Adapter::new(Box::new(raw), client_ip, server_ip);
-    adapter.set_mss(mtu.saturating_sub(60));
+    adapter.set_mss(mtu.min(8192) - 60);
     let mut adapter = adapter.to_async_handle();
 
     let rsd_stream = adapter
@@ -282,8 +282,12 @@ pub unsafe extern "C" fn tunnel_create_remotexpc(
 /// Use this when connecting to a device discovered via `_remotepairing._tcp`.
 /// The connection goes: direct TCP → RPPairing (JSON) → tunnel.
 ///
-/// This path only supports pair-verify (existing pairing file required).
-/// For initial pairing, use `tunnel_pair_usb`.
+/// `pairing_file` is used for pair-verify. If verification fails (typically
+/// because the device has never been paired with this host) a full pair-setup
+/// runs on the same connection and `pairing_file` is updated in place, so the
+/// caller should persist it afterwards regardless of whether it was freshly
+/// generated.
+///
 ///
 /// # Safety
 /// All pointer arguments must be valid and non-null (except `pin_callback`/`pin_context`).
@@ -336,6 +340,83 @@ pub unsafe extern "C" fn tunnel_create_rppairing(
     match res {
         Ok((adapter, handshake)) => {
             write_result(adapter, handshake, out_adapter, out_handshake);
+            null_mut()
+        }
+        Err(e) => ffi_err!(e),
+    }
+}
+
+/// Pairs with a device over the network via raw RPPairing, without creating a tunnel.
+///
+/// This is for tvOS.
+///
+/// On iOS `tunnel_create_rppairing` handles both halves on its own; this function
+/// is only needed there if you want to pair and connect as separate steps.
+///
+/// # Arguments
+/// * `addr` / `addr_len` - address of the pairing service to connect to.
+/// * `hostname` - name this host presents to the device.
+/// * `pairing_file` - borrowed, not consumed. Updated in place on success. Pass a
+///   freshly generated file (`rp_pairing_file_generate`) for a first-time pairing.
+/// * `pin_callback` / `pin_context` - invoked to obtain the PIN shown on the
+///   device. May be `NULL`.
+/// * `out_peer_device` - optional. If non-NULL, receives the paired device's
+///   identity, which the caller must free with `rppairing_peer_device_free`. Only
+///   written when a pair-setup actually ran; a successful pair-verify leaves it
+///   NULL.
+///
+/// # Safety
+/// All pointer arguments must be valid and non-null except `pin_callback`,
+/// `pin_context`, and `out_peer_device`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rppairing_pair_network(
+    addr: *const idevice_sockaddr,
+    addr_len: idevice_socklen_t,
+    hostname: *const c_char,
+    pairing_file: *mut RpPairingFileHandle,
+    pin_callback: Option<extern "C" fn(context: *mut c_void) -> *const c_char>,
+    pin_context: *mut c_void,
+    out_peer_device: *mut *mut RpPairingPeerDeviceC,
+) -> *mut IdeviceFfiError {
+    if addr.is_null() || hostname.is_null() || pairing_file.is_null() {
+        return ffi_err!(IdeviceError::FfiInvalidArg);
+    }
+
+    let socket_addr = match crate::util::c_socket_to_rust(addr as *const SockAddr, addr_len) {
+        Ok(a) => a,
+        Err(e) => return ffi_err!(e),
+    };
+    let host = match unsafe { CStr::from_ptr(hostname) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return ffi_err!(IdeviceError::FfiInvalidString),
+    };
+    let rpf = unsafe { &mut (*pairing_file).0 };
+    let ctx = PinCtx(pin_context);
+
+    let res = run_sync_local(async {
+        let stream = run_global_timeout(|| tokio::net::TcpStream::connect(socket_addr))
+            .await
+            .map_err(|e| IdeviceError::InternalError(format!("connect: {e}")))?;
+        let conn = RpPairingSocket::new(stream);
+
+        let mut rpc = RemotePairingClient::new(conn, &host);
+        rpc.connect(rpf, async || get_pin(pin_callback, &ctx))
+            .await?;
+
+        // Only present when a pair-setup ran; a successful pair-verify has none.
+        Ok::<_, IdeviceError>(rpc.paired_peer_device().ok().map(peer_device_to_c))
+    });
+
+    match res {
+        Ok(peer_device) => {
+            if !out_peer_device.is_null() {
+                unsafe {
+                    *out_peer_device = match peer_device {
+                        Some(p) => Box::into_raw(Box::new(p)),
+                        None => null_mut(),
+                    }
+                };
+            }
             null_mut()
         }
         Err(e) => ffi_err!(e),

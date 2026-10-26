@@ -1,14 +1,16 @@
 // Jackson Coxson
 
+use futures::{Stream, StreamExt};
 use plist_macro::plist_to_xml_bytes;
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::{IdeviceError, ReadWrite, RsdService, obf, xpc::XPCObject};
+use crate::{IdeviceError, ReadWrite, obf, xpc::XPCObject};
 
 use super::CoreDeviceServiceClient;
 
-impl RsdService for AppServiceClient<Box<dyn ReadWrite>> {
+#[cfg(feature = "rsd")]
+impl crate::RsdService for AppServiceClient<Box<dyn ReadWrite>> {
     fn rsd_service_name() -> std::borrow::Cow<'static, str> {
         obf!("com.apple.coredevice.appservice")
     }
@@ -145,13 +147,13 @@ impl<R: ReadWrite> AppServiceClient<R> {
         internal_apps: bool,
         default_apps: bool,
     ) -> Result<Vec<AppListEntry>, IdeviceError> {
-        let options = crate::plist!(dict {
-            "includeAppClips": app_clips,
-            "includeRemovableApps": removable_apps,
-            "includeHiddenApps": hidden_apps,
-            "includeInternalApps": internal_apps,
-            "includeDefaultApps": default_apps,
-        });
+        let options = app_list_options(
+            app_clips,
+            removable_apps,
+            hidden_apps,
+            internal_apps,
+            default_apps,
+        );
         let res = self
             .inner
             .invoke_with_plist("com.apple.coredevice.feature.listapps", options)
@@ -182,6 +184,39 @@ impl<R: ReadWrite> AppServiceClient<R> {
         }
 
         Ok(desd)
+    }
+
+    /// Streams applications through CoreDevice's side channel.
+    ///
+    /// Consume the stream to completion before invoking another operation on this
+    /// client. If it is dropped early, reconnect the client before reusing it.
+    pub fn stream_apps(
+        &mut self,
+        app_clips: bool,
+        removable_apps: bool,
+        hidden_apps: bool,
+        internal_apps: bool,
+        default_apps: bool,
+    ) -> impl Stream<Item = Result<AppListEntry, IdeviceError>> + '_ {
+        let options = app_list_options(
+            app_clips,
+            removable_apps,
+            hidden_apps,
+            internal_apps,
+            default_apps,
+        );
+        self.inner
+            .invoke_streaming_with_plist("com.apple.coredevice.feature.streamapplist", options)
+            .map(|element| {
+                element.and_then(|element| {
+                    plist::from_value(&element).map_err(|error| {
+                        warn!("Failed to parse streamed app entry: {error:?}");
+                        IdeviceError::UnexpectedResponse(
+                            "failed to parse streamed app list entry".into(),
+                        )
+                    })
+                })
+            })
     }
 
     /// Launches an application by a bundle ID.
@@ -335,59 +370,29 @@ impl<R: ReadWrite> AppServiceClient<R> {
 
         Ok(res)
     }
+}
 
-    #[cfg(feature = "dvt")]
-    pub async fn fetch_app_icon(
-        &mut self,
-        bundle_id: impl Into<String>,
-        width: f32,
-        height: f32,
-        scale: f32,
-        allow_placeholder: bool,
-    ) -> Result<IconData, IdeviceError> {
-        let bundle_id = bundle_id.into();
-        let res = self
-            .inner
-            .invoke_with_plist(
-                "com.apple.coredevice.feature.fetchappicons",
-                crate::plist!({
-                    "width": width,
-                    "height": height,
-                    "scale": scale,
-                    "allowPlaceholder": allow_placeholder,
-                    "bundleIdentifier": bundle_id
-                })
-                .into_dictionary()
-                .unwrap(),
-            )
-            .await?;
-
-        let res = match res
-            .as_dictionary()
-            .and_then(|x| x.get("appIconContainer"))
-            .and_then(|x| x.as_dictionary())
-            .and_then(|x| x.get("iconImage"))
-            .and_then(|x| x.as_data())
-        {
-            Some(r) => r.to_vec(),
-            None => {
-                warn!("Did not receive appIconContainer/iconImage data");
-                return Err(IdeviceError::UnexpectedResponse(
-                    "missing appIconContainer/iconImage data in fetch icon response".into(),
-                ));
-            }
-        };
-
-        let res = ns_keyed_archive::decode::from_bytes(&res)
-            .map_err(crate::services::dvt::errors::DvtError::from)?;
-        match plist::from_value(&res) {
-            Ok(r) => Ok(r),
-            Err(e) => {
-                warn!("Failed to deserialize ns keyed archive: {e:?}");
-                Err(IdeviceError::UnexpectedResponse(
-                    "failed to deserialize icon NSKeyedArchive".into(),
-                ))
-            }
-        }
-    }
+/// The `InstalledAppsRequestParams` both app-listing features decode.
+///
+/// Its last three keys are required even though listing asks for neither
+/// container nor App Group metadata: the decoder rejects the request with
+/// `NSCoderValueNotFoundError` ("Expected to find key requireContainerAccess")
+/// when they are absent.
+fn app_list_options(
+    app_clips: bool,
+    removable_apps: bool,
+    hidden_apps: bool,
+    internal_apps: bool,
+    default_apps: bool,
+) -> plist::Dictionary {
+    crate::plist!(dict {
+        "includeAppClips": app_clips,
+        "includeRemovableApps": removable_apps,
+        "includeHiddenApps": hidden_apps,
+        "includeInternalApps": internal_apps,
+        "includeDefaultApps": default_apps,
+        "includeAppGroupIdentifiers": false,
+        "includeContainerPaths": false,
+        "requireContainerAccess": false,
+    })
 }

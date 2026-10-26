@@ -27,6 +27,10 @@ pub const USB_TIMEOUT_MS: u32 = 10_000;
 pub const TRANSFER_SIZE_RECOVERY: usize = 0x8000;
 /// Control transfer chunk size in DFU/WTF mode.
 pub const TRANSFER_SIZE_DFU: usize = 0x800;
+/// Max packet size of the high-speed bulk OUT endpoint iBoot exposes in recovery
+/// mode. A payload that is a whole multiple of this needs a terminating
+/// zero-length packet (see [`RecoveryDevice::send_buffer`]).
+const BULK_MAX_PACKET_SIZE: usize = 512;
 
 /// A boxed, `Send` future returned by [`RecoveryTransport`] methods.
 pub type RecoveryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, IdeviceError>> + Send + 'a>>;
@@ -98,7 +102,7 @@ pub trait RecoveryTransport: Send + Sync + std::fmt::Debug {
     fn set_configuration(&mut self, configuration: u8) -> RecoveryFuture<'_, ()>;
 
     /// Claims an interface / alternate setting.
-    fn claim_interface(&mut self, interface: u8, alt_setting: u8) -> RecoveryFuture<'_, ()>;
+    fn claim_interface(&mut self, iface: u8, alt_setting: u8) -> RecoveryFuture<'_, ()>;
 
     /// Resets the USB device (the device re-enumerates afterwards).
     fn reset(&mut self) -> RecoveryFuture<'_, ()>;
@@ -132,7 +136,56 @@ impl RecoveryDevice {
             info,
         };
         dev.configure().await?;
+        dev.load_nonces_from_descriptor().await;
         Ok(dev)
+    }
+
+    /// Fills in the AP/SEP nonces from USB string descriptor index 1
+    async fn load_nonces_from_descriptor(&mut self) {
+        if self.info.ap_nonce.is_some() && self.info.sep_nonce.is_some() {
+            return;
+        }
+        match self.read_string_descriptor(1).await {
+            Ok(extra) => {
+                debug!("string descriptor 1: {extra:?}");
+                let parsed = DeviceInfo::parse(&extra);
+                if self.info.ap_nonce.is_none() {
+                    self.info.ap_nonce = parsed.ap_nonce;
+                }
+                if self.info.sep_nonce.is_none() {
+                    self.info.sep_nonce = parsed.sep_nonce;
+                }
+                for (k, v) in parsed.raw {
+                    self.info.raw.entry(k).or_insert(v);
+                }
+            }
+            Err(e) => debug!("could not read string descriptor 1 for nonces: {e}"),
+        }
+    }
+
+    async fn read_string_descriptor(&mut self, index: u8) -> Result<String, IdeviceError> {
+        let data = self
+            .transport
+            .control_in(
+                ControlSetup::new(0x80, 0x06, (0x03 << 8) | index as u16, 0x0409),
+                255,
+                USB_TIMEOUT_MS,
+            )
+            .await?;
+        // A string descriptor is [bLength, bDescriptorType=0x03, UTF-16LE units...].
+        if data.len() < 2 || data[1] != 0x03 {
+            return Err(IdeviceError::Restore(RestoreError::Recovery(format!(
+                "string descriptor {index} malformed or absent"
+            ))));
+        }
+        let end = (data[0] as usize).min(data.len());
+        let units: Vec<u16> = data[2..end]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        Ok(String::from_utf16_lossy(&units))
     }
 
     /// Applies the per-mode configuration/interface setup.
@@ -239,6 +292,10 @@ impl RecoveryDevice {
                     chunk.len()
                 ))));
             }
+        }
+
+        if !buf.is_empty() && buf.len().is_multiple_of(BULK_MAX_PACKET_SIZE) {
+            self.transport.bulk_out(0x04, &[], USB_TIMEOUT_MS).await?;
         }
         Ok(())
     }

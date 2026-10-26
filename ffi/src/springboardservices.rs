@@ -4,19 +4,26 @@ use std::{
 };
 
 use idevice::{
-    IdeviceError, IdeviceService, RsdService, provider::IdeviceProvider,
+    IdeviceError, IdeviceService, provider::IdeviceProvider,
     springboardservices::SpringBoardServicesClient,
 };
 use plist_ffi::plist_t;
 
 use crate::{
-    IdeviceFfiError, IdeviceHandle, core_device_proxy::AdapterHandle, ffi_err,
-    provider::IdeviceProviderHandle, rsd::RsdHandshakeHandle, run_sync, run_sync_local,
+    IdeviceFfiError, IdeviceHandle, ffi_err, provider::IdeviceProviderHandle, run_sync,
+    run_sync_local,
 };
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
+use crate::{core_device_proxy::AdapterHandle, rsd::RsdHandshakeHandle};
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
+use idevice::RsdService as _;
 
 pub struct SpringBoardServicesClientHandle(pub SpringBoardServicesClient);
 
 /// Connects to the Springboard service using a provider
+///
+/// The caller retains ownership of `provider` on both success and failure and
+/// must free it with `idevice_provider_free` when it is no longer needed.
 ///
 /// # Arguments
 /// * [`provider`] - An IdeviceProvider
@@ -49,12 +56,7 @@ pub unsafe extern "C" fn springboard_services_connect(
             unsafe { *client = Box::into_raw(boxed) };
             null_mut()
         }
-        Err(e) => {
-            // If connection failed, the provider_box was already forgotten,
-            // so we need to reconstruct it to avoid leak
-            let _ = unsafe { Box::from_raw(provider) };
-            ffi_err!(e)
-        }
+        Err(e) => ffi_err!(e),
     }
 }
 
@@ -72,6 +74,7 @@ pub unsafe extern "C" fn springboard_services_connect(
 /// `provider` must be a valid pointer to a handle allocated by this library
 /// `handshake` must be a valid pointer to a handle allocated by this library
 /// `client` must be a valid, non-null pointer to a location where the handle will be stored
+#[cfg(all(feature = "core_device_proxy", feature = "rsd"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn springboard_services_connect_rsd(
     provider: *mut AdapterHandle,
