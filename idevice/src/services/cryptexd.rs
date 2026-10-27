@@ -113,6 +113,18 @@ impl CryptexInstallRequest {
     }
 }
 
+/// Upload progress counts all five payloads. WaitingForReply begins only after
+/// all bytes and END_STREAM markers have been sent.
+#[derive(Debug, Clone, Copy)]
+pub enum CryptexInstallProgress {
+    Uploading {
+        payload: &'static str,
+        sent: usize,
+        total: usize,
+    },
+    WaitingForReply,
+}
+
 #[derive(Debug)]
 pub struct CryptexdClient<R: ReadWrite> {
     inner: RemoteXpcClient<R>,
@@ -256,7 +268,15 @@ impl<R: ReadWrite> CryptexdClient<R> {
     /// The five payloads are announced in the request as XPC file transfers and
     /// then pushed on their own streams; the daemon only replies once it has
     /// consumed all of them.
-    pub async fn install(mut self, request: CryptexInstallRequest) -> Result<(), IdeviceError> {
+    pub async fn install(self, request: CryptexInstallRequest) -> Result<(), IdeviceError> {
+        self.install_with_progress(request, |_| {}).await
+    }
+
+    pub async fn install_with_progress(
+        mut self,
+        request: CryptexInstallRequest,
+        mut progress: impl FnMut(CryptexInstallProgress) + Send,
+    ) -> Result<(), IdeviceError> {
         let transfers: [(&str, &[u8]); 5] = [
             ("image", &request.image),
             ("trustcache", &request.trustcache),
@@ -294,14 +314,28 @@ impl<R: ReadWrite> CryptexdClient<R> {
         });
         self.inner.send_object(req, true).await?;
 
+        let total = transfers.iter().map(|(_, payload)| payload.len()).sum();
+        let mut completed = 0;
         for (transfer_id, (key, payload)) in transfers.iter().enumerate() {
-            debug!("pushing cryptex {key} payload ({} bytes)", payload.len());
+            tracing::info!("Uploading Cryptex {key}: {} bytes", payload.len());
             self.inner
-                .send_file_transfer(transfer_id as u64 + 1, payload)
+                .send_file_transfer_with_progress(transfer_id as u64 + 1, payload, |sent, _| {
+                    progress(CryptexInstallProgress::Uploading {
+                        payload: key,
+                        sent: completed + sent,
+                        total,
+                    });
+                })
                 .await?;
+            completed += payload.len();
+            tracing::info!("Uploaded Cryptex {key}");
         }
-
-        let res = self.inner.recv().await?;
+        progress(CryptexInstallProgress::WaitingForReply);
+        tracing::info!("Cryptex upload complete; waiting for the device installation reply");
+        let res = tokio::time::timeout(std::time::Duration::from_secs(60), self.inner.recv())
+            .await.map_err(|_| IdeviceError::UnexpectedResponse(
+                "Cryptex upload completed, but the device did not return an installation reply within 60 seconds; check the device cryptexd syslog".into()
+            ))??;
         unwrap_reply("install", res)?;
         Ok(())
     }

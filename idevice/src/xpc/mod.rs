@@ -267,6 +267,17 @@ impl<R: ReadWrite> RemoteXpcClient<R> {
         transfer_id: u64,
         data: &[u8],
     ) -> Result<(), IdeviceError> {
+        self.send_file_transfer_with_progress(transfer_id, data, |_, _| {})
+            .await
+    }
+
+    /// Push a file transfer, reporting bytes accepted by the HTTP/2 sender.
+    pub async fn send_file_transfer_with_progress(
+        &mut self,
+        transfer_id: u64,
+        data: &[u8],
+        mut progress: impl FnMut(usize, usize) + Send,
+    ) -> Result<(), IdeviceError> {
         let stream_id = self.next_outbound_file_stream;
         self.next_outbound_file_stream += 2;
 
@@ -283,7 +294,13 @@ impl<R: ReadWrite> RemoteXpcClient<R> {
         )
         .encode(transfer_id)?;
         self.h2_client.send(preamble, stream_id).await?;
-        self.h2_client.send(data.to_vec(), stream_id).await?;
+        progress(0, data.len());
+        let mut sent = 0;
+        for chunk in data.chunks(64 * 1024) {
+            self.h2_client.send(chunk.to_vec(), stream_id).await?;
+            sent += chunk.len();
+            progress(sent, data.len());
+        }
         self.h2_client
             .send_end_stream(Vec::new(), stream_id)
             .await?;

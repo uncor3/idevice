@@ -141,10 +141,7 @@ impl<R: ReadWrite> Http2Client<R> {
         end_stream: bool,
     ) -> Result<(), IdeviceError> {
         const MAX_FRAME_SIZE: usize = 16384;
-        let mut chunks = payload.chunks(MAX_FRAME_SIZE).peekable();
-        // Always send at least one frame, even for an empty payload. An empty
-        // DATA frame costs no flow-control window, so send it directly.
-        if chunks.peek().is_none() {
+        if payload.is_empty() {
             let frame = frame::DataFrame {
                 stream_id,
                 payload: Vec::new(),
@@ -152,33 +149,36 @@ impl<R: ReadWrite> Http2Client<R> {
             }
             .serialize();
             self.inner.write_all(&frame).await?;
-            self.inner.flush().await?;
-            return Ok(());
         }
-        while let Some(chunk) = chunks.next() {
-            let need = chunk.len() as i64;
-            // Respect the peer's flow-control window: a DATA frame must not exceed
-            // either the connection-level or the stream-level send window, or the
-            // peer aborts the connection with a GOAWAY (FLOW_CONTROL_ERROR). When
-            // either window is exhausted, pump inbound frames until the peer grants
-            // more room with a WINDOW_UPDATE. (Matters for large payloads like
-            // pasteboard images; small ones fit in the initial 64 KiB window.)
-            while self.conn_send_window < need || self.stream_send_window(stream_id) < need {
-                self.pump().await?;
+        let mut offset = 0;
+        while offset < payload.len() {
+            // Send whatever fits, including a partial frame. Waiting for a full
+            // 16 KiB frame can deadlock when the peer waits for its remaining
+            // credit to be consumed before replenishing the window.
+            while self.conn_send_window <= 0 || self.stream_send_window(stream_id) <= 0 {
+                self.inner.flush().await?;
+                tokio::time::timeout(std::time::Duration::from_secs(30), self.pump())
+                    .await.map_err(|_| IdeviceError::UnexpectedResponse(format!(
+                        "Device stopped accepting data on HTTP/2 stream {stream_id} after {offset}/{} bytes (30-second flow-control timeout)", payload.len()
+                    )))??;
             }
+            let size = (payload.len() - offset)
+                .min(MAX_FRAME_SIZE)
+                .min(self.conn_send_window as usize)
+                .min(self.stream_send_window(stream_id) as usize);
             let frame = frame::DataFrame {
                 stream_id,
-                payload: chunk.to_vec(),
-                // Only the last chunk carries END_STREAM.
-                end_stream: end_stream && chunks.peek().is_none(),
+                payload: payload[offset..offset + size].to_vec(),
+                end_stream: end_stream && offset + size == payload.len(),
             }
             .serialize();
             self.inner.write_all(&frame).await?;
-            self.conn_send_window -= need;
+            self.conn_send_window -= size as i64;
             *self
                 .stream_send_windows
                 .get_mut(&stream_id)
-                .expect("seeded by stream_send_window above") -= need;
+                .expect("window initialized") -= size as i64;
+            offset += size;
         }
         self.inner.flush().await?;
         Ok(())
@@ -315,5 +315,61 @@ impl<R: ReadWrite> Http2Client<R> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn send_consumes_small_windows_before_waiting_for_more_credit() {
+        for (connection_window, stream_window) in [(7, 20), (20, 7), (7, 7)] {
+            let (socket, mut peer) = tokio::io::duplex(1024);
+            let mut client = Http2Client::new(socket).await.unwrap();
+            client.conn_send_window = connection_window;
+            client.stream_send_windows.insert(5, stream_window);
+            client.open_stream(5).await.unwrap();
+            let sender = async {
+                client.send_end_stream(vec![42; 20], 5).await.unwrap();
+            };
+            let receiver = async {
+                let mut preface = vec![0; HTTP2_MAGIC.len() + 9];
+                peer.read_exact(&mut preface).await.unwrap();
+                let mut received = Vec::new();
+                for expected_size in [7, 13] {
+                    let mut header = [0; 9];
+                    peer.read_exact(&mut header).await.unwrap();
+                    let size = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+                    assert_eq!(size, expected_size);
+                    assert_eq!(header[3], 0);
+                    assert_eq!(header[4] & 1, u8::from(expected_size == 13));
+                    let mut bytes = vec![0; size];
+                    peer.read_exact(&mut bytes).await.unwrap();
+                    received.extend(bytes);
+                    if expected_size == 7 {
+                        // Only replenish after the first window was consumed.
+                        for stream_id in [0, 5] {
+                            peer.write_all(
+                                &frame::WindowUpdateFrame {
+                                    stream_id,
+                                    increment_size: 13,
+                                }
+                                .serialize(),
+                            )
+                            .await
+                            .unwrap();
+                        }
+                    }
+                }
+                assert_eq!(received, vec![42; 20]);
+            };
+            timeout(Duration::from_secs(2), async {
+                tokio::join!(sender, receiver);
+            })
+            .await
+            .expect("sender deadlocked with unused flow-control credit");
+        }
     }
 }
