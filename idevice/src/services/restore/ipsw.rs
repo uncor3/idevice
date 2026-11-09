@@ -51,6 +51,12 @@ where
             .position(|e| e.filename().as_str().map(|f| f == path).unwrap_or(false))
     }
 
+    /// Returns the uncompressed size of an archive entry.
+    pub fn file_size(&self, path: &str) -> Option<u64> {
+        self.entry_index(path)
+            .map(|index| self.zip.file().entries()[index].uncompressed_size())
+    }
+
     /// Reads a file from the archive by its exact path into memory.
     ///
     /// Suitable for firmware components (a few MB at most). The filesystem DMG

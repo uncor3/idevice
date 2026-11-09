@@ -95,6 +95,13 @@ pub trait RecoveryTransport: Send + Sync + std::fmt::Debug {
     /// The USB serial-number string (source of mode/ECID/CPID/BDID/SRTG/nonces).
     fn serial_number(&mut self) -> RecoveryFuture<'_, String>;
 
+    /// Hidden USB string descriptor containing `NONC` and `SNON` on classic
+    /// recovery/DFU devices. This is read after configuring the USB interface,
+    /// matching libirecovery's initialization order.
+    fn nonce_descriptor(&mut self) -> RecoveryFuture<'_, String> {
+        Box::pin(async { Ok(String::new()) })
+    }
+
     /// `idProduct` from the device descriptor (used to determine the mode).
     fn product_id(&self) -> u16;
 
@@ -128,7 +135,6 @@ impl RecoveryDevice {
         })?;
         let serial = transport.serial_number().await?;
         let info = DeviceInfo::parse(&serial);
-        debug!("recovery device: mode={mode:?} info={info:?}");
 
         let mut dev = Self {
             transport,

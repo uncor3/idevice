@@ -96,6 +96,19 @@ async fn run(
         "Update"
     };
 
+    {
+        let mut ipsw = open_ipsw(&ipsw_path).await?;
+        let build_manifest = ipsw.build_manifest().await?;
+        if !manifest_supports_img4(&build_manifest) {
+            return Err(IdeviceError::Restore(RestoreError::Other(
+                "this IPSW does not expose IMG4 firmware components; idevice's restore is \
+                 IMG4-only"
+                    .into(),
+            )));
+        }
+    }
+
+
     if behavior == "Update"
         && let Some(provider) = provider.as_deref()
     {
@@ -175,13 +188,7 @@ async fn run(
 
     let mut request = TSSRequest::new();
     request.set_ap_img4_ticket(true);
-    request.add_common_tags(
-        board_id,
-        chip_id,
-        ecid,
-        ap_nonce.clone(),
-        sep_nonce.clone().or(Some(vec![0u8; 20])),
-    );
+    request.add_common_tags(board_id, chip_id, ecid, ap_nonce.clone(), sep_nonce.clone());
     request.add_ap_tags(&build_identity);
     request.add_ap_manifest_tags(&build_identity, &parameters)?;
     let response = request.send().await?;
@@ -481,13 +488,7 @@ async fn create_stashbag_if_needed(
     let parameters = parameters.as_dictionary().unwrap().clone();
     let mut request = TSSRequest::new();
     request.set_ap_img4_ticket(true);
-    request.add_common_tags(
-        board_id,
-        chip_id,
-        ecid,
-        ap_nonce,
-        sep_nonce.or(Some(vec![0u8; 20])),
-    );
+    request.add_common_tags(board_id, chip_id, ecid, ap_nonce, sep_nonce);
     request.add_ap_tags(&build_identity);
     request.add_ap_manifest_tags(&build_identity, &parameters)?;
     let response = match request.send().await? {
@@ -626,6 +627,46 @@ async fn boot_to_restore(
     let _ = recovery.send_command_with_request("bootx", 1).await;
     Ok(())
 }
+
+fn build_identity_supports_img4(build_identity: &plist::Dictionary) -> bool {
+    if build_identity
+        .get("Ap,SupportsImg4")
+        .and_then(plist::Value::as_boolean)
+        == Some(true)
+    {
+        return true;
+    }
+
+    // Apple does not include `Ap,SupportsImg4` in every BuildManifest. Modern
+    // manifests still identify the format through their `.im4p` components.
+    build_identity
+        .get("Manifest")
+        .and_then(plist::Value::as_dictionary)
+        .is_some_and(|components| {
+            components.values().any(|component| {
+                component
+                    .as_dictionary()
+                    .and_then(|component| component.get("Info"))
+                    .and_then(plist::Value::as_dictionary)
+                    .and_then(|info| info.get("Path"))
+                    .and_then(plist::Value::as_string)
+                    .is_some_and(|path| path.to_ascii_lowercase().ends_with(".im4p"))
+            })
+        })
+}
+
+/// Whether any build identity in the manifest is for an IMG4 device.
+fn manifest_supports_img4(build_manifest: &plist::Dictionary) -> bool {
+    build_manifest
+        .get("BuildIdentities")
+        .and_then(plist::Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .filter_map(plist::Value::as_dictionary)
+                .any(build_identity_supports_img4)
+        })
+}
+
 
 /// Whether the build identity has a component.
 fn has_component(build_identity: &plist::Dictionary, name: &str) -> bool {

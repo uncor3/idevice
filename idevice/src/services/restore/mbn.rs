@@ -33,8 +33,8 @@ fn detect_image_size(data: &[u8]) -> Option<usize> {
     } else if data.len() > MBN_BIN_MAGIC.len() + MBN_BIN_MAGIC_OFFSET
         && data[MBN_BIN_MAGIC_OFFSET..MBN_BIN_MAGIC_OFFSET + MBN_BIN_MAGIC.len()] == *MBN_BIN_MAGIC
     {
-        // MBN BIN: total_size at u32 index 1.
-        read_u32_le(data, 4).map(|s| s as usize)
+        // MBN BIN: total_size follows the 8-byte magic, unknown, and version.
+        read_u32_le(data, 16).map(|s| s as usize)
     } else {
         None
     }

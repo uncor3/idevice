@@ -173,6 +173,7 @@ const SUPPORTED_DATA_TYPES: &[(&str, bool)] = &[
     ("BuildIdentityDict", false),
     ("BuildIdentityDictV2", false),
     ("DataType", false),
+    ("DeviceRestoreInfoPreflight", false),
     ("DiagData", false),
     ("EANData", false),
     ("FDRMemoryCommit", false),

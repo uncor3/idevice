@@ -75,6 +75,9 @@ pub(super) async fn dispatch(
             .await
         }
         "NORData" => send_nor(ctx, message).await,
+        "FirmwareUpdaterPreflight" | "DeviceRestoreInfoPreflight" => {
+            send_firmware_updater_preflight(ctx, message).await
+        }
         "FirmwareUpdaterData" => super::fw_updater::send_firmware_updater_data(ctx, message).await,
         "BasebandData" => super::fw_updater::send_baseband_data(ctx, message).await,
         "FDRTrustData" => send_fdr_trust_data(ctx, message).await,
@@ -107,6 +110,19 @@ pub(super) async fn dispatch(
             Ok(())
         }
     }
+}
+
+/// Acknowledges firmware-updater preflight requests.
+///
+/// RestoreOS blocks until the host replies, even though the expected response
+/// is an empty dictionary. This mirrors idevicerestore's
+/// `restore_send_firmware_updater_preflight` handler.
+async fn send_firmware_updater_preflight(
+    ctx: &mut RestoreContext<'_>,
+    message: &plist::Dictionary,
+) -> Result<(), IdeviceError> {
+    info!("sending firmware updater preflight response");
+    send_to_data_service(ctx, message, Value::Dictionary(plist::Dictionary::new())).await
 }
 
 async fn personalize_path(

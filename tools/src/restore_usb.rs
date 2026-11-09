@@ -1,6 +1,6 @@
 //! nusb-backed `RecoveryTransport` for the restore CLI.
 
-use std::time::Duration;
+use std::{num::NonZeroU8, time::Duration};
 
 use idevice::{
     IdeviceError,
@@ -137,6 +137,24 @@ impl RecoveryTransport for NusbRecoveryTransport {
     fn serial_number(&mut self) -> RecoveryFuture<'_, String> {
         let serial = self.serial.clone();
         Box::pin(async move { Ok(serial) })
+    }
+
+    fn nonce_descriptor(&mut self) -> RecoveryFuture<'_, String> {
+        let device = self.device.clone();
+        Box::pin(async move {
+            let index = NonZeroU8::new(1).expect("USB descriptor index is nonzero");
+            let timeout = Duration::from_secs(10);
+            let language = device
+                .get_string_descriptor_supported_languages(timeout)
+                .await
+                .ok()
+                .and_then(|mut languages| languages.next())
+                .unwrap_or(nusb::descriptors::language_id::US_ENGLISH);
+            Ok(device
+                .get_string_descriptor(index, language, timeout)
+                .await
+                .unwrap_or_default())
+        })
     }
 
     fn product_id(&self) -> u16 {

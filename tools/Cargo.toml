@@ -45,6 +45,9 @@ idevice = { path = "../idevice", features = [
   "application_listing",
   "condition_inducer",
   "network_monitor",
+  "restore",
+  "restore_recovery",
+  "restore_service",
   "sysmontap",
   "tunnel_tcp_stack_pcap",
 ], default-features = false }
