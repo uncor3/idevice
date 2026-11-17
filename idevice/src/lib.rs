@@ -24,6 +24,7 @@ pub mod tcp;
 pub mod tss;
 #[cfg(feature = "tunneld")]
 pub mod tunneld;
+pub mod usb;
 #[cfg(feature = "usbmuxd")]
 pub mod usbmuxd;
 pub mod utils;

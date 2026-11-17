@@ -17,6 +17,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 use crate::{
     IdeviceError, ReadWrite, RemoteXpcClient, obf,
     services::core_device::CoreDeviceError,
+    usb::APPLE_VENDOR_ID,
     xpc::{Dictionary, XPCObject},
 };
 
@@ -141,7 +142,6 @@ const MAIN_KEYBOARD_MIN_USAGE: u16 = 0x01;
 const MAIN_KEYBOARD_MAX_USAGE: u16 = 0xE7;
 const MAIN_KEYBOARD_PRIMARY_USAGE: u64 = 0x06;
 const MAIN_KEYBOARD_PRIMARY_USAGE_PAGE: u64 = 0x01;
-const MAIN_KEYBOARD_VENDOR_ID: i64 = 0x05AC;
 const MAIN_KEYBOARD_PRODUCT_ID: i64 = 0x0250;
 const MAIN_KEYBOARD_REQUESTED_SERVICE_ID: u64 = 0x1_0000_2001;
 const MAIN_KEYBOARD_PRODUCT: &str = "idevice mainKeyboard";
@@ -285,12 +285,12 @@ fn build_main_keyboard_create_request() -> XPCObject {
                 "PrimaryUsagePage": MAIN_KEYBOARD_PRIMARY_USAGE_PAGE,
                 "Product": MAIN_KEYBOARD_PRODUCT,
                 "ProductID": MAIN_KEYBOARD_PRODUCT_ID,
-                "VendorID": MAIN_KEYBOARD_VENDOR_ID,
+                "VendorID": i64::from(APPLE_VENDOR_ID),
                 "_CoreDevice_codablePropertyStorage": {
                     "Manufacturer": { "string": MAIN_KEYBOARD_MANUFACTURER },
                     "Product": { "string": MAIN_KEYBOARD_PRODUCT },
                     "ProductID": { "int": MAIN_KEYBOARD_PRODUCT_ID },
-                    "VendorID": { "int": MAIN_KEYBOARD_VENDOR_ID },
+                    "VendorID": { "int": i64::from(APPLE_VENDOR_ID) },
                     "PrimaryUsage": { "int": MAIN_KEYBOARD_PRIMARY_USAGE as i64 },
                     "PrimaryUsagePage": {
                         "int": MAIN_KEYBOARD_PRIMARY_USAGE_PAGE as i64,
